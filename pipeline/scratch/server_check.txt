@@ -1,0 +1,6 @@
+API server started (PID 18656)
+Next.js server started (PID 27120)
+API UP: 200 http://localhost:8001/api/health
+Next.js UP: 200 http://localhost:3000/
+
+DONE - servers running. Kill manually when done testing.

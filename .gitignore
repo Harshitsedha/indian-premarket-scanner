@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Environment — never commit secrets
+.env
+pipeline/.env
+
+# Data files — too large for git
+data/instruments/NSE_instruments.csv
+data/instruments/*.csv.gz
+data/postgres/
+data/redis/
+data/raw_snapshots/
+
+# Next.js
+dashboard/.next/
+dashboard/node_modules/
+dashboard/.env.local
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

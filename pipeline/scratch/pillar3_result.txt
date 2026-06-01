@@ -1,0 +1,51 @@
+============================================================
+STEP 1: Running migration 004
+============================================================
+Migration OK
+
+STEP 2: Table verification (\dt)
+Tables: daily_briefings, headlines, outcomes, setup_results, setups, stocks_in_play, upstox_tokens
+
+setups:
+  id                        integer
+  trading_date              date
+  symbol                    text
+  setup_type                text
+  hypothesis                text
+  bias_direction            text
+  bias_confidence           integer
+  gap_pct                   numeric
+  gap_source                text
+  score                     numeric
+  signals                   jsonb
+  thesis                    text
+  key_level                 numeric
+  created_at                timestamp with time zone
+
+outcomes:
+  id                        integer
+  setup_id                  integer
+  trading_date              date
+  symbol                    text
+  open_price                numeric
+  actual_gap_pct            numeric
+  day_high                  numeric
+  day_low                   numeric
+  close_price               numeric
+  move_pct                  numeric
+  result                    text
+  hypothesis_correct        boolean
+  notes                     text
+  fetched_at                timestamp with time zone
+
+============================================================
+STEP 3: log_setups() end-to-end test
+============================================================
+Inserted setup IDs: [1, 2]
+
+STEP 4: DB verification query
+setups rows (last 5):
+  id=2  2026-06-01  INFY         news_catalyst   bearish  bias=bearish(3) gap=-1.20 score=0.4900
+  id=1  2026-06-01  RELIANCE     news_catalyst   bullish  bias=bearish(3) gap=0.90 score=0.6200
+
+ALL DONE
