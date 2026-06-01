@@ -1,0 +1,26 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: premarket
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /opt/premarket
+            git pull origin main
+            source pipeline/.venv/bin/activate
+            pip install -e pipeline/ --quiet
+            cd dashboard && npm ci && npm run build && cd ..
+            sudo systemctl restart premarket-scheduler
+            sudo systemctl restart premarket-api
+            sudo systemctl restart premarket-dashboard
+            echo "Deploy complete $(date)"
