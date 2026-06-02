@@ -66,7 +66,7 @@ const sentOf  = (s: string | null) => SENT[sentKey(s)] ?? SENT.neutral;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const API = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8001";
+const API = process.env.NEXT_PUBLIC_API_BASE || "";
 
 const SORT_SENT: Record<string, number> = { bullish: 0, bearish: 1, neutral: 2 };
 

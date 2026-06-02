@@ -60,7 +60,7 @@ function impColor(imp: number | null): string {
   return `rgba(${Math.round(107 + t * 17)}, ${Math.round(104 + t * 7)}, ${Math.round(128 + t * 96)}, ${(0.35 + t * 0.65).toFixed(2)})`;
 }
 
-const API = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8001";
+const API = process.env.NEXT_PUBLIC_API_BASE || "";
 
 export function HistoryTable({ rows }: { rows: HistoryRow[] }) {
   const [expanded, setExpanded]   = useState<string | null>(null);
