@@ -180,33 +180,51 @@ def _fetch_fiidii(client: httpx.Client) -> dict[str, Any]:
 
 def fetch_nse_data() -> dict[str, Any]:
     """
-    Fetch previous trading day Bhavcopy and FII/DII activity.
+    Fetch FII/DII activity from NSE and derive trading_date from Upstox.
+
+    NSE bhavcopy (archives CDN) is skipped — it returns HTTP 404 from cloud
+    VPS IPs due to Akamai bot-protection.  Previous-close per stock is sourced
+    directly from Upstox in the ranker (get_bulk_quotes / get_prev_close).
+    trading_date is now derived from the most recent Upstox candle date.
 
     Returns:
         {
-            "bhavcopy":     [{"symbol": "RELIANCE", "open": 2800.0, ...}, ...],
+            "bhavcopy":     [],            # disabled — use Upstox in ranker
             "fii_dii":      {"fii_net": 423.5, "dii_net": -210.3},
-            "trading_date": "2024-01-15",
+            "trading_date": "2026-06-01",  # from Upstox, not NSE archives
         }
     """
-    prev_day = _prev_trading_day(date.today())
-    logger.info(f"NSE scrape starting -- target trading date: {prev_day}")
+    # ── trading_date from Upstox ──────────────────────────────────────────────
+    try:
+        from ingestion.upstox_client import fetch_upstox_trading_date
+        upstox_date = fetch_upstox_trading_date()
+    except Exception as exc:
+        logger.warning(f"fetch_upstox_trading_date import/call failed: {exc}")
+        upstox_date = None
 
+    if upstox_date:
+        trading_date = date.fromisoformat(upstox_date)
+    else:
+        trading_date = _prev_trading_day(date.today())
+        logger.warning(
+            f"Upstox trading date unavailable — falling back to calendar estimate: {trading_date}"
+        )
+
+    logger.info(f"Trading date: {trading_date}")
+
+    # ── FII/DII from NSE (this endpoint still works) ──────────────────────────
     with httpx.Client(
         headers=_HEADERS, follow_redirects=True, timeout=20.0
     ) as client:
-        # Seed NSE session cookies — required for FII/DII and helps with archives
         try:
             client.get(NSE_HOME)
             logger.debug(f"NSE session seeded (cookies: {list(client.cookies.keys())})")
         except Exception as exc:
             logger.warning(f"NSE session seed failed (continuing): {exc}")
-
-        bhavcopy, trading_date = _fetch_bhavcopy(prev_day, client)
         fii_dii = _fetch_fiidii(client)
 
     return {
-        "bhavcopy": bhavcopy,
+        "bhavcopy": [],
         "fii_dii": fii_dii,
         "trading_date": trading_date.isoformat(),
     }

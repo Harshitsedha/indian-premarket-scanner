@@ -295,3 +295,30 @@ class UpstoxClient:
             for c in candles
         ]
         return list(reversed(rows))   # candles arrive newest-first; return oldest-first
+
+
+# ── module-level helpers ──────────────────────────────────────────────────────
+
+def fetch_upstox_trading_date(
+    probe_symbols: list[str] | None = None,
+) -> str | None:
+    """
+    Return the most recent trading date (ISO string, e.g. "2026-06-01") by
+    pulling the latest daily candle for a set of large-cap probe symbols.
+
+    Tries each symbol in order until one succeeds.  Returns None only if all
+    probes fail (token missing, network error, etc.).
+    """
+    if probe_symbols is None:
+        probe_symbols = ["RELIANCE", "INFY", "TCS"]
+    client = UpstoxClient()
+    for symbol in probe_symbols:
+        try:
+            result = client.get_prev_close(symbol)
+            if result and result.get("date"):
+                logger.info(f"Upstox trading date: {result['date']} (via {symbol})")
+                return result["date"]
+        except Exception as exc:
+            logger.warning(f"fetch_upstox_trading_date: {symbol} probe failed: {exc}")
+    logger.warning("fetch_upstox_trading_date: all probes failed")
+    return None
