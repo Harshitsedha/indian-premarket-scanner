@@ -18,11 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from loguru import logger                                       # noqa: E402
 from utils.logger import setup_logger                          # noqa: E402
-from ingestion.news_scraper import scrape_et_markets           # noqa: E402
-from ingestion.moneycontrol_scraper import scrape_moneycontrol # noqa: E402
-from ingestion.mint_scraper import scrape_mint                 # noqa: E402
-from ingestion.ndtv_scraper import scrape_ndtv                 # noqa: E402
-from ingestion.hindu_scraper import scrape_hindu               # noqa: E402
+from ingestion.pulse_scraper import scrape_pulse               # noqa: E402
 from ingestion.nse_scraper import fetch_nse_data               # noqa: E402
 from ingestion.global_cues import fetch_global_cues, bias_summary  # noqa: E402
 from processing.normaliser import normalise                    # noqa: E402
@@ -40,21 +36,7 @@ async def run(save: bool = False, notify: bool = False) -> dict:
 
     # Step 1 -- Ingestion
     logger.info("Step 1/5 -- Ingestion")
-    et_headlines, mc_headlines, mint_headlines, ndtv_headlines, hindu_headlines = await asyncio.gather(
-        scrape_et_markets(max_headlines=15),
-        scrape_moneycontrol(max_headlines=10),
-        scrape_mint(max_headlines=10),
-        scrape_ndtv(max_headlines=10),
-        scrape_hindu(max_headlines=10),
-        return_exceptions=False,
-    )
-    all_headlines = (
-        (et_headlines or []) +
-        (mc_headlines or []) +
-        (mint_headlines or []) +
-        (ndtv_headlines or []) +
-        (hindu_headlines or [])
-    )
+    all_headlines = await scrape_pulse(max_headlines=40)
     seen: set[str] = set()
     news: list[dict] = []
     for h in all_headlines:
@@ -62,7 +44,7 @@ async def run(save: bool = False, notify: bool = False) -> dict:
         if key not in seen:
             seen.add(key)
             news.append(h)
-    logger.info(f"Total headlines after dedup: {len(news)} from 5 sources")
+    logger.info(f"Total headlines after dedup: {len(news)} (from Pulse)")
     nse = fetch_nse_data()
     cues = fetch_global_cues()
     global_bias = bias_summary(cues)
