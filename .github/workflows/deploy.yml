@@ -15,12 +15,37 @@ jobs:
           username: premarket
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
+            set -e
             cd /opt/premarket
+
+            # Snapshot HEAD before pulling so we can diff exactly what changed.
+            OLD_HEAD=$(git rev-parse HEAD)
             git pull origin main
-            source pipeline/.venv/bin/activate
-            pip install -e pipeline/ --quiet
-            cd dashboard && npm ci && npm run build && cd ..
-            sudo systemctl restart premarket-scheduler
-            sudo systemctl restart premarket-api
-            sudo systemctl restart premarket-dashboard
+            CHANGED=$(git diff --name-only "$OLD_HEAD" HEAD)
+            echo "Changed files since $OLD_HEAD:"
+            echo "${CHANGED:-  (none — already up to date)}"
+
+            # ── Dashboard (frontend) ──────────────────────────────────────────
+            # Rebuild and restart only when files under dashboard/ changed.
+            if echo "$CHANGED" | grep -qE "^dashboard/"; then
+              echo "=== Frontend changed — rebuilding dashboard ==="
+              cd /opt/premarket/dashboard
+              npm install
+              npm run build
+              sudo systemctl restart premarket-dashboard
+              echo "premarket-dashboard restarted"
+              cd /opt/premarket
+            fi
+
+            # ── Pipeline (API + scheduler) ────────────────────────────────────
+            # Reinstall Python deps and restart services only when pipeline/ changed.
+            if echo "$CHANGED" | grep -qE "^pipeline/"; then
+              echo "=== Pipeline changed — reinstalling deps and restarting services ==="
+              source pipeline/.venv/bin/activate
+              pip install -e pipeline/ --quiet
+              sudo systemctl restart premarket-api
+              sudo systemctl restart premarket-scheduler
+              echo "premarket-api + premarket-scheduler restarted"
+            fi
+
             echo "Deploy complete $(date)"
