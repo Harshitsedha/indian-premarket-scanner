@@ -286,7 +286,7 @@ export default function NewsPage() {
       {/* Header */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
         <div>
-          <h1 style={{ color: t.text, fontSize: 18, fontWeight: 600, margin: 0 }}>News</h1>
+          <h1 style={{ color: t.text, fontSize: 18, fontWeight: 600, margin: 0 }}>News ✓</h1>
           <span style={{ color: t.muted, fontSize: 12 }}>
             {newsDate || "…"}&nbsp;·&nbsp;
             {loading
