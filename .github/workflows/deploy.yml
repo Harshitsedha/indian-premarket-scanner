@@ -3,6 +3,7 @@ name: Deploy to VPS
 on:
   push:
     branches: [main]
+  workflow_dispatch: {}  # manual "Deploy" button in GitHub Actions UI
 
 jobs:
   deploy:
@@ -25,22 +26,37 @@ jobs:
             echo "Changed files since $OLD_HEAD:"
             echo "${CHANGED:-  (none — already up to date)}"
 
+            # When CHANGED is empty the pull was a no-op (re-run or already current).
+            # Treat that as "rebuild everything" so re-runs are never silent no-ops.
+            REBUILD_ALL=false
+            if [ -z "$CHANGED" ]; then
+              echo "=== No file delta detected — forcing full rebuild (re-run or manual trigger) ==="
+              REBUILD_ALL=true
+            fi
+
             # ── Dashboard (frontend) ──────────────────────────────────────────
-            # Rebuild and restart only when files under dashboard/ changed.
-            if echo "$CHANGED" | grep -qE "^dashboard/"; then
-              echo "=== Frontend changed — rebuilding dashboard ==="
+            # Rebuild when dashboard/ files changed, or on a forced full rebuild.
+            if [ "$REBUILD_ALL" = true ] || echo "$CHANGED" | grep -qE "^dashboard/"; then
+              echo "=== Frontend: rebuilding dashboard ==="
+              BUILD_START=$(date +%s)
               cd /opt/premarket/dashboard
               npm install
               npm run build
+              # Flaw-2 guard: confirm .next/BUILD_ID was written after this run started.
+              BUILD_ID_MTIME=$(date -r .next/BUILD_ID +%s 2>/dev/null || echo 0)
+              if [ "$BUILD_ID_MTIME" -lt "$BUILD_START" ]; then
+                echo "ERROR: .next/BUILD_ID was not updated — build may be stale or failed silently" >&2
+                exit 1
+              fi
               sudo systemctl restart premarket-dashboard
               echo "premarket-dashboard restarted"
               cd /opt/premarket
             fi
 
             # ── Pipeline (API + scheduler) ────────────────────────────────────
-            # Reinstall Python deps and restart services only when pipeline/ changed.
-            if echo "$CHANGED" | grep -qE "^pipeline/"; then
-              echo "=== Pipeline changed — reinstalling deps and restarting services ==="
+            # Reinstall Python deps and restart services when pipeline/ changed, or on forced rebuild.
+            if [ "$REBUILD_ALL" = true ] || echo "$CHANGED" | grep -qE "^pipeline/"; then
+              echo "=== Pipeline: reinstalling deps and restarting services ==="
               source pipeline/.venv/bin/activate
               pip install -e pipeline/ --quiet
               sudo systemctl restart premarket-api
