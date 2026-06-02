@@ -98,7 +98,18 @@ def health():
 
 @app.get("/api/briefing/today")
 def briefing_today():
-    today = date.today()
+    # trading_date is the *previous* trading day (from Upstox candles), not today's
+    # calendar date — always query the most recent briefing by id to avoid date mismatch.
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT trading_date FROM daily_briefings ORDER BY id DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    today = row[0] if row else date.today()
     conn  = _db()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -305,7 +316,19 @@ def setups_for_date(date_str: str):
 
 @app.get("/api/news/today")
 def news_today():
-    return _news_for_date(date.today())
+    # trading_date is stored as the previous trading day (from Upstox candles),
+    # not the calendar date when the pipeline ran — always use the latest briefing.
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT trading_date FROM daily_briefings ORDER BY id DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    target = row[0] if row else date.today()
+    return _news_for_date(target)
 
 
 # ── GET /api/news/{date_str} ──────────────────────────────────────────────────

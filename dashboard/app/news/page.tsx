@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+// ── Types ─────────────────────────────────────────────────────────────────────
+
 type Headline = {
   id: number;
   source: string;
@@ -22,25 +24,59 @@ type NewsData = {
 type SortKey = "importance" | "newest" | "sentiment" | "source";
 type SentKey = "all" | "bullish" | "bearish" | "neutral";
 
+type Theme = {
+  bg: string;
+  surface: string;
+  card: string;
+  border: string;
+  text: string;
+  textSecondary: string;
+  muted: string;
+  accent: string;
+  inputBg: string;
+};
+
+// ── Themes ────────────────────────────────────────────────────────────────────
+
+const DARK: Theme = {
+  bg:          "#0A0A0F",
+  surface:     "#13131A",
+  card:        "#16161F",
+  border:      "#1E1E2E",
+  text:        "#E8E6F0",
+  textSecondary: "#C8C5D8",
+  muted:       "#6B6880",
+  accent:      "#7C6FE0",
+  inputBg:     "#0F0F18",
+};
+
+const LIGHT: Theme = {
+  bg:          "#F0F0F5",
+  surface:     "#FAFAFA",
+  card:        "#FFFFFF",
+  border:      "#DCDCE8",
+  text:        "#1A1826",
+  textSecondary: "#3A3650",
+  muted:       "#7878A0",
+  accent:      "#6355D0",
+  inputBg:     "#F5F5FA",
+};
+
+// ── Sentiment palette ─────────────────────────────────────────────────────────
+
+const SENT: Record<string, { border: string; bg: string; text: string; label: string }> = {
+  bullish: { border: "#1D9E75", bg: "rgba(29,158,117,0.10)", text: "#1D9E75", label: "Bullish" },
+  bearish: { border: "#E05252", bg: "rgba(224,82,82,0.10)",  text: "#E05252", label: "Bearish" },
+  neutral: { border: "#6B6880", bg: "rgba(107,104,128,0.08)", text: "#8886A0", label: "Neutral" },
+};
+
+const sentOf = (s: string | null) => SENT[(s ?? "neutral").toLowerCase()] ?? SENT.neutral;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 const API = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8001";
 
-const SENT_COLOR: Record<string, string> = {
-  bullish: "var(--bullish)",
-  bearish: "var(--bearish)",
-  neutral: "var(--muted)",
-};
-const SENT_BG: Record<string, string> = {
-  bullish: "rgba(29,158,117,0.15)",
-  bearish: "rgba(224,82,82,0.15)",
-  neutral: "rgba(107,104,128,0.15)",
-};
-const SORT_SENT: Record<string, number> = { bullish: 0, neutral: 1, bearish: 2 };
-
-function impColor(imp: number | null): string {
-  if (!imp) return "var(--border)";
-  const t = (imp - 1) / 4; // 0→1
-  return `rgba(${Math.round(107 + t * 17)}, ${Math.round(104 + t * 7)}, ${Math.round(128 + t * 96)}, ${(0.35 + t * 0.65).toFixed(2)})`;
-}
+const SORT_SENT: Record<string, number> = { bullish: 0, bearish: 1, neutral: 2 };
 
 function timeAgo(iso: string | null): string {
   if (!iso) return "";
@@ -52,12 +88,149 @@ function timeAgo(iso: string | null): string {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
+// ── ImportanceBars ────────────────────────────────────────────────────────────
+
+function ImportanceBars({ value, t }: { value: number | null; t: Theme }) {
+  const imp = value ?? 0;
+  return (
+    <div style={{ display: "flex", gap: 2, alignItems: "flex-end" }}>
+      {[1, 2, 3, 4, 5].map((i) => {
+        const filled = i <= imp;
+        const height = 4 + i * 2;
+        return (
+          <div
+            key={i}
+            style={{
+              width: 3,
+              height,
+              borderRadius: 1.5,
+              backgroundColor: filled
+                ? `rgba(124,111,224,${0.35 + (imp / 5) * 0.65})`
+                : t.border,
+              transition: "background-color 0.15s",
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+// ── HeadlineCard ──────────────────────────────────────────────────────────────
+
+function HeadlineCard({ h, t }: { h: Headline; t: Theme }) {
+  const [hovered, setHovered] = useState(false);
+  const sp = sentOf(h.sentiment);
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        backgroundColor: t.card,
+        border: `1px solid ${hovered ? t.accent : t.border}`,
+        borderLeft: `4px solid ${sp.border}`,
+        borderRadius: 8,
+        padding: "12px 14px 10px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 7,
+        transition: "border-color 0.15s",
+        boxSizing: "border-box",
+      }}
+    >
+      {/* Top row: source + importance bars */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <span
+          style={{
+            fontSize: 11,
+            fontWeight: 700,
+            color: t.muted,
+            textTransform: "uppercase",
+            letterSpacing: "0.06em",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            maxWidth: "70%",
+          }}
+        >
+          {h.source}
+        </span>
+        <ImportanceBars value={h.importance} t={t} />
+      </div>
+
+      {/* Headline */}
+      {h.url ? (
+        <a
+          href={h.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            color: hovered ? t.accent : t.text,
+            fontSize: 14,
+            fontWeight: 500,
+            lineHeight: 1.45,
+            textDecoration: "none",
+            display: "block",
+            transition: "color 0.15s",
+          }}
+        >
+          {h.headline}
+        </a>
+      ) : (
+        <p style={{ color: t.text, fontSize: 14, fontWeight: 500, lineHeight: 1.45, margin: 0 }}>
+          {h.headline}
+        </p>
+      )}
+
+      {/* Claude reason */}
+      {h.reason && (
+        <p
+          style={{
+            color: t.muted,
+            fontSize: 12,
+            lineHeight: 1.4,
+            fontStyle: "italic",
+            margin: 0,
+          }}
+        >
+          {h.reason}
+        </p>
+      )}
+
+      {/* Bottom row: sentiment badge + time */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 2 }}>
+        <span
+          style={{
+            fontSize: 11,
+            fontWeight: 600,
+            padding: "2px 8px",
+            borderRadius: 999,
+            backgroundColor: sp.bg,
+            color: sp.text,
+          }}
+        >
+          {sp.label}
+        </span>
+        {h.scraped_at && (
+          <span style={{ fontSize: 11, color: t.muted }}>{timeAgo(h.scraped_at)}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Page ──────────────────────────────────────────────────────────────────────
+
 export default function NewsPage() {
-  const [data, setData] = useState<NewsData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [sort, setSort] = useState<SortKey>("importance");
-  const [sentFilter, setSentFilter] = useState<SentKey>("all");
+  const [data,         setData]         = useState<NewsData | null>(null);
+  const [loading,      setLoading]      = useState(true);
+  const [sort,         setSort]         = useState<SortKey>("importance");
+  const [sentFilter,   setSentFilter]   = useState<SentKey>("all");
   const [sourceFilter, setSourceFilter] = useState("all");
+  const [isDark,       setIsDark]       = useState(true);
+
+  const t = isDark ? DARK : LIGHT;
 
   useEffect(() => {
     fetch(`${API}/api/news/today`)
@@ -81,275 +254,183 @@ export default function NewsPage() {
     return [...hs].sort((a, b) => {
       if (sort === "importance") {
         const d = (b.importance ?? 0) - (a.importance ?? 0);
-        if (d !== 0) return d;
-        return (b.scraped_at ?? "") < (a.scraped_at ?? "") ? -1 : 1;
+        return d !== 0 ? d : (b.scraped_at ?? "") > (a.scraped_at ?? "") ? 1 : -1;
       }
       if (sort === "newest")
-        return (b.scraped_at ?? "") < (a.scraped_at ?? "") ? -1 : 1;
+        return (b.scraped_at ?? "") > (a.scraped_at ?? "") ? 1 : -1;
       if (sort === "sentiment")
-        return (
-          (SORT_SENT[a.sentiment ?? "neutral"] ?? 1) -
-          (SORT_SENT[b.sentiment ?? "neutral"] ?? 1)
-        );
+        return (SORT_SENT[a.sentiment ?? "neutral"] ?? 2) - (SORT_SENT[b.sentiment ?? "neutral"] ?? 2);
       if (sort === "source") return a.source.localeCompare(b.source);
       return 0;
     });
   }, [data, sentFilter, sourceFilter, sort]);
 
   const sentPills: { key: SentKey; label: string }[] = [
-    { key: "all", label: "All" },
-    { key: "bullish", label: "🟢 Bullish" },
-    { key: "bearish", label: "🔴 Bearish" },
-    { key: "neutral", label: "⚪ Neutral" },
+    { key: "all",     label: "All" },
+    { key: "bullish", label: "▲ Bullish" },
+    { key: "bearish", label: "▼ Bearish" },
+    { key: "neutral", label: "● Neutral" },
   ];
 
+  const inputStyle = {
+    backgroundColor: t.inputBg,
+    color: t.text,
+    border: `1px solid ${t.border}`,
+    borderRadius: 6,
+    padding: "4px 10px",
+    fontSize: 12,
+    cursor: "pointer",
+    outline: "none",
+  } as const;
+
+  const pillStyle = (active: boolean, sent?: string) => ({
+    fontSize: 12,
+    padding: "4px 12px",
+    borderRadius: 999,
+    border: `1px solid ${active ? t.accent : t.border}`,
+    backgroundColor: active ? `rgba(124,111,224,0.15)` : "transparent",
+    color: active ? t.accent : t.muted,
+    cursor: "pointer",
+    fontWeight: active ? 600 : 400,
+    transition: "all 0.12s",
+  } as const);
+
   return (
-    <div>
+    <div style={{ backgroundColor: t.bg, minHeight: "100vh", padding: "0 0 40px" }}>
+      {/* Responsive grid style */}
+      <style>{`
+        .news-grid {
+          display: grid;
+          grid-template-columns: repeat(2, 1fr);
+          gap: 10px;
+        }
+        @media (max-width: 720px) {
+          .news-grid { grid-template-columns: 1fr; }
+        }
+      `}</style>
+
       {/* Page header */}
       <div
         style={{
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          marginBottom: 20,
+          marginBottom: 16,
+          flexWrap: "wrap",
+          gap: 8,
         }}
       >
-        <h1 style={{ color: "var(--muted)", fontSize: 20, fontWeight: 500, margin: 0 }}>
-          News — {data?.date ?? "…"}
-        </h1>
-        <span style={{ color: "var(--muted)", fontSize: 13 }}>
-          {loading
-            ? "…"
-            : `${filtered.length}${filtered.length !== (data?.count ?? 0) ? ` of ${data?.count}` : ""} headlines`}
-        </span>
+        <div>
+          <h1 style={{ color: t.text, fontSize: 18, fontWeight: 600, margin: 0 }}>
+            News
+          </h1>
+          <span style={{ color: t.muted, fontSize: 12 }}>
+            {data?.date ?? "…"} &nbsp;·&nbsp;{" "}
+            {loading
+              ? "loading…"
+              : `${filtered.length}${filtered.length !== (data?.count ?? 0) ? ` of ${data?.count}` : ""} headlines`}
+          </span>
+        </div>
+
+        {/* Theme toggle */}
+        <button
+          onClick={() => setIsDark((d) => !d)}
+          style={{
+            backgroundColor: t.inputBg,
+            border: `1px solid ${t.border}`,
+            borderRadius: 20,
+            padding: "5px 14px",
+            color: t.muted,
+            fontSize: 12,
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: 5,
+          }}
+        >
+          {isDark ? "☀ Light" : "☾ Dark"}
+        </button>
       </div>
 
       {/* Sticky filter bar */}
       <div
         style={{
           position: "sticky",
-          top: 45,
+          top: 0,
           zIndex: 40,
-          backgroundColor: "var(--bg)",
-          borderBottom: "1px solid var(--border)",
+          backgroundColor: t.bg,
+          borderBottom: `1px solid ${t.border}`,
           display: "flex",
           flexWrap: "wrap",
-          gap: 10,
+          gap: 8,
           alignItems: "center",
-          padding: "10px 0",
+          padding: "10px 0 10px",
           marginBottom: 16,
         }}
       >
-        <select
-          value={sort}
-          onChange={(e) => setSort(e.target.value as SortKey)}
-          style={{
-            backgroundColor: "var(--surface)",
-            color: "var(--text)",
-            border: "1px solid var(--border)",
-            borderRadius: 6,
-            padding: "4px 8px",
-            fontSize: 13,
-            cursor: "pointer",
-          }}
-        >
-          <option value="importance">Importance</option>
-          <option value="newest">Newest</option>
-          <option value="sentiment">Sentiment</option>
-          <option value="source">Source</option>
+        {/* Sort */}
+        <select value={sort} onChange={(e) => setSort(e.target.value as SortKey)} style={inputStyle}>
+          <option value="importance">↕ Importance</option>
+          <option value="newest">⏱ Newest</option>
+          <option value="sentiment">● Sentiment</option>
+          <option value="source">A Source</option>
         </select>
 
-        <div style={{ display: "flex", gap: 4 }}>
+        {/* Sentiment pills */}
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
           {sentPills.map(({ key, label }) => (
-            <button
-              key={key}
-              onClick={() => setSentFilter(key)}
-              style={{
-                fontSize: 12,
-                padding: "3px 10px",
-                borderRadius: 999,
-                border: "1px solid",
-                borderColor: sentFilter === key ? "var(--accent)" : "var(--border)",
-                backgroundColor:
-                  sentFilter === key ? "rgba(124,111,224,0.15)" : "transparent",
-                color: sentFilter === key ? "var(--accent)" : "var(--muted)",
-                cursor: "pointer",
-              }}
-            >
+            <button key={key} onClick={() => setSentFilter(key)} style={pillStyle(sentFilter === key)}>
               {label}
             </button>
           ))}
         </div>
 
+        {/* Source dropdown */}
         <select
           value={sourceFilter}
           onChange={(e) => setSourceFilter(e.target.value)}
-          style={{
-            backgroundColor: "var(--surface)",
-            color: "var(--text)",
-            border: "1px solid var(--border)",
-            borderRadius: 6,
-            padding: "4px 8px",
-            fontSize: 13,
-            cursor: "pointer",
-          }}
+          style={inputStyle}
         >
           <option value="all">All sources</option>
           {sources.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
+            <option key={s} value={s}>{s}</option>
           ))}
         </select>
       </div>
 
       {/* Content */}
       {loading ? (
-        <p style={{ color: "var(--muted)", textAlign: "center", padding: "48px 0" }}>
-          Loading…
-        </p>
+        <div style={{ textAlign: "center", padding: "64px 0" }}>
+          <div
+            style={{
+              width: 28,
+              height: 28,
+              border: `3px solid ${t.border}`,
+              borderTop: `3px solid ${t.accent}`,
+              borderRadius: "50%",
+              margin: "0 auto 12px",
+              animation: "spin 0.8s linear infinite",
+            }}
+          />
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+          <p style={{ color: t.muted, fontSize: 13 }}>Loading headlines…</p>
+        </div>
       ) : filtered.length === 0 ? (
-        <div style={{ textAlign: "center", padding: "48px 0" }}>
-          <p style={{ color: "var(--muted)" }}>No headlines yet today.</p>
-          <p style={{ color: "var(--muted)", fontSize: 13, marginTop: 8 }}>
-            Headlines appear after the 08:45 IST pipeline run.
+        <div style={{ textAlign: "center", padding: "64px 0" }}>
+          <p style={{ color: t.muted, fontSize: 16, fontWeight: 500 }}>No headlines found.</p>
+          <p style={{ color: t.muted, fontSize: 13, marginTop: 6 }}>
+            {(data?.count ?? 0) > 0
+              ? "Try adjusting the filters above."
+              : "Headlines appear after the 08:45 IST pipeline run."}
           </p>
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <div className="news-grid">
           {filtered.map((h) => (
-            <HeadlineRow key={h.id} h={h} />
+            <HeadlineCard key={h.id} h={h} t={t} />
           ))}
         </div>
       )}
-    </div>
-  );
-}
-
-function HeadlineRow({ h }: { h: Headline }) {
-  const imp = h.importance ?? 0;
-  const sent = (h.sentiment ?? "neutral").toLowerCase();
-
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "stretch",
-        backgroundColor: "var(--surface)",
-        border: "0.5px solid var(--border)",
-        borderRadius: 8,
-        overflow: "hidden",
-        transition: "border-color 0.15s",
-      }}
-      onMouseEnter={(e) =>
-        ((e.currentTarget as HTMLElement).style.borderColor = "var(--accent)")
-      }
-      onMouseLeave={(e) =>
-        ((e.currentTarget as HTMLElement).style.borderColor = "var(--border)")
-      }
-    >
-      {/* Importance bar + number */}
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 4,
-          padding: "12px 10px",
-          minWidth: 36,
-        }}
-      >
-        <div
-          style={{
-            width: 3,
-            height: imp > 0 ? imp * 8 + 4 : 4,
-            backgroundColor: impColor(h.importance),
-            borderRadius: 2,
-          }}
-        />
-        <span
-          style={{ fontSize: 11, color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}
-        >
-          {imp || "—"}
-        </span>
-      </div>
-
-      {/* Main */}
-      <div style={{ flex: 1, padding: "10px 4px 10px 0", minWidth: 0 }}>
-        {h.url ? (
-          <a
-            href={h.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{
-              color: "var(--text)",
-              fontSize: 15,
-              lineHeight: 1.4,
-              display: "block",
-              textDecoration: "none",
-            }}
-            onMouseEnter={(e) =>
-              ((e.currentTarget as HTMLElement).style.textDecoration = "underline")
-            }
-            onMouseLeave={(e) =>
-              ((e.currentTarget as HTMLElement).style.textDecoration = "none")
-            }
-          >
-            {h.headline}
-          </a>
-        ) : (
-          <p style={{ color: "var(--text)", fontSize: 15, lineHeight: 1.4, margin: 0 }}>
-            {h.headline}
-          </p>
-        )}
-        {h.reason && (
-          <p
-            style={{
-              color: "var(--muted)",
-              fontSize: 12,
-              fontStyle: "italic",
-              marginTop: 4,
-              lineHeight: 1.4,
-            }}
-          >
-            {h.reason}
-          </p>
-        )}
-      </div>
-
-      {/* Right */}
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "flex-end",
-          justifyContent: "center",
-          gap: 4,
-          padding: "10px 12px 10px 8px",
-          minWidth: 100,
-          flexShrink: 0,
-        }}
-      >
-        <span
-          style={{
-            fontSize: 11,
-            padding: "2px 8px",
-            borderRadius: 999,
-            backgroundColor: SENT_BG[sent] ?? SENT_BG.neutral,
-            color: SENT_COLOR[sent] ?? "var(--muted)",
-            fontWeight: 500,
-          }}
-        >
-          {sent}
-        </span>
-        <span style={{ fontSize: 12, color: "var(--muted)" }}>{h.source}</span>
-        {h.scraped_at && (
-          <span style={{ fontSize: 11, color: "var(--muted)" }}>
-            {timeAgo(h.scraped_at)}
-          </span>
-        )}
-      </div>
     </div>
   );
 }
