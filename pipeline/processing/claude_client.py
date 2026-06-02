@@ -66,12 +66,35 @@ _SYSTEM_EDGE = (
 
 # ── internal helpers ──────────────────────────────────────────────────────────
 
-def _strip_fences(text: str) -> str:
-    """Remove ```json ... ``` or ``` ... ``` wrappers Claude sometimes adds."""
+def _extract_json(text: str) -> dict:
+    """
+    Robustly extract JSON from Claude's response.
+    Handles: raw JSON, ```json fences, ``` fences, truncated/unterminated fences,
+    leading/trailing whitespace.
+    Raises: ValueError if parsing fails completely.
+    """
     text = text.strip()
-    text = re.sub(r"^```(?:json)?\s*\n?", "", text, flags=re.MULTILINE)
-    text = re.sub(r"\n?```\s*$", "", text, flags=re.MULTILINE)
-    return text.strip()
+
+    # Complete fence pair: ```json ... ```
+    fence_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', text)
+    if fence_match:
+        text = fence_match.group(1).strip()
+    elif text.startswith('```'):
+        # Truncated response: opening fence but no closing fence
+        text = re.sub(r'^```(?:json)?\s*\n?', '', text).strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Last resort: find first { ... } block in the string
+        brace_match = re.search(r'\{[\s\S]*\}', text)
+        if brace_match:
+            try:
+                return json.loads(brace_match.group())
+            except json.JSONDecodeError:
+                pass
+
+    raise ValueError(f"Could not extract valid JSON from Claude response:\n{text}")
 
 
 def _build_news_prompt(headlines: list[dict[str, Any]]) -> str:
@@ -141,7 +164,7 @@ def analyse_news(headlines: list[dict[str, Any]]) -> dict[str, Any]:
     prompt = _build_news_prompt(headlines)
 
     try:
-        response = _call_claude(client, _SYSTEM_NEWS, prompt, max_tokens=1024)
+        response = _call_claude(client, _SYSTEM_NEWS, prompt, max_tokens=2048)
     except anthropic.APIError as exc:
         raise ClaudeClientError(f"analyse_news: API failed after retries: {exc}") from exc
 
@@ -149,12 +172,10 @@ def analyse_news(headlines: list[dict[str, Any]]) -> dict[str, Any]:
     raw = response.content[0].text
 
     try:
-        result: dict[str, Any] = json.loads(_strip_fences(raw))
-    except json.JSONDecodeError as exc:
-        logger.error(f"Claude returned non-JSON:\n{raw[:300]}")
-        raise ClaudeClientError(
-            f"JSON parse failed: {exc} | raw snippet: {raw[:200]}"
-        ) from exc
+        result: dict[str, Any] = _extract_json(raw)
+    except (ValueError, KeyError) as exc:
+        logger.error(f"Claude response parse error: {exc}")
+        raise ClaudeClientError(f"JSON parse failed: {exc}") from exc
 
     return result
 

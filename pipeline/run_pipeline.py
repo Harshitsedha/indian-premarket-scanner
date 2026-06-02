@@ -34,21 +34,19 @@ from storage.database import save_briefing                     # noqa: E402
 from delivery.telegram_bot import send_briefing as telegram_send  # noqa: E402
 
 
-def run(save: bool = False, notify: bool = False) -> dict:
+async def run(save: bool = False, notify: bool = False) -> dict:
     setup_logger("INFO")
     logger.info("=== PreMarket Pro pipeline starting ===")
 
     # Step 1 -- Ingestion
     logger.info("Step 1/5 -- Ingestion")
-    et_headlines, mc_headlines, mint_headlines, ndtv_headlines, hindu_headlines = asyncio.run(
-        asyncio.gather(
-            scrape_et_markets(max_headlines=15),
-            scrape_moneycontrol(max_headlines=10),
-            scrape_mint(max_headlines=10),
-            scrape_ndtv(max_headlines=10),
-            scrape_hindu(max_headlines=10),
-            return_exceptions=False,
-        )
+    et_headlines, mc_headlines, mint_headlines, ndtv_headlines, hindu_headlines = await asyncio.gather(
+        scrape_et_markets(max_headlines=15),
+        scrape_moneycontrol(max_headlines=10),
+        scrape_mint(max_headlines=10),
+        scrape_ndtv(max_headlines=10),
+        scrape_hindu(max_headlines=10),
+        return_exceptions=False,
     )
     all_headlines = (
         (et_headlines or []) +
@@ -81,17 +79,15 @@ def run(save: bool = False, notify: bool = False) -> dict:
     # Step 3 -- Claude analysis
     logger.info("Step 3/5 -- Claude API analysis")
     if normalised["headline_count"] == 0:
-        logger.error("No headlines available after normalisation -- aborting pipeline")
-        logger.error(
-            "  Likely causes: ET Markets scraper blocked, or all headlines "
-            "were too short / duplicate. Check ingestion logs above."
+        raise RuntimeError(
+            "No headlines available after normalisation — "
+            "likely ET Markets scraper blocked or all headlines too short/duplicate"
         )
-        sys.exit(1)
     try:
         analysis = analyse_news(normalised["headlines"])
     except ClaudeClientError as exc:
         logger.error(f"Claude analysis failed: {exc}")
-        sys.exit(1)
+        raise
     logger.info(
         f"  bias={analysis['overall_bias']['direction']}, "
         f"confidence={analysis['overall_bias']['confidence']}"
@@ -142,12 +138,12 @@ def run(save: bool = False, notify: bool = False) -> dict:
 
     if save:
         logger.info("Saving briefing to database...")
-        briefing_id = asyncio.run(save_briefing(bias, stocks, normalised, analysis))
+        briefing_id = await save_briefing(bias, stocks, normalised, analysis)
         print(f"\nBriefing saved  : id={briefing_id}")
 
     if notify:
         logger.info("Sending Telegram notification...")
-        asyncio.run(telegram_send(bias, stocks, normalised))
+        await telegram_send(bias, stocks, normalised)
         print("Telegram sent   : ok")
 
     return {
@@ -162,5 +158,5 @@ def run(save: bool = False, notify: bool = False) -> dict:
 if __name__ == "__main__":
     save_flag   = "--save"   in sys.argv
     notify_flag = "--notify" in sys.argv
-    result = run(save=save_flag, notify=notify_flag)
+    result = asyncio.run(run(save=save_flag, notify=notify_flag))
     sys.exit(0)

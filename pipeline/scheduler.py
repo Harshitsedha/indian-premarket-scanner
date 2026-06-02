@@ -2,15 +2,17 @@
 APScheduler-based scheduler for the PreMarket Pro pipeline.
 
 Jobs (IST):
-  08:45 Mon-Fri  morning_briefing  — full pipeline: scrape, analyse, save, notify
-  08:50 Mon-Fri  health_ping       — ping Healthchecks.io only if pipeline succeeded
+  08:45 Mon-Fri  morning_briefing          — full pipeline: scrape, analyse, save, notify, healthcheck
+  15:45 Mon-Fri  outcome_fetcher           — EOD outcome fetch (10:15 UTC)
+  16:00 Fri      edge_analyser             — weekly edge pattern analysis (10:30 UTC Fri)
+  05:00 Mon      instrument_master_refresh — NSE instrument master weekly refresh (23:30 UTC Sun)
+  06:05 Mon      upstox_token_expiry_check — Upstox extended_token expiry warning (00:35 UTC Mon)
 """
 
 import asyncio
 import html
 import sys
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 # Ensure pipeline/ root is importable when run directly
 _PIPELINE_ROOT = Path(__file__).resolve().parent
@@ -28,16 +30,11 @@ from loguru import logger
 
 from utils.config import settings
 from utils.logger import setup_logger
-from run_pipeline import run as _run_pipeline
+from run_pipeline import run
 from ingestion.upstox_token_refresh import check_extended_token_expiry
 from ingestion.upstox_instruments import refresh_instrument_master
 from processing.outcome_fetcher import fetch_and_log_outcomes
 from processing.edge_analyser import run_edge_analysis
-
-_IST = ZoneInfo("Asia/Kolkata")
-
-# Set True by morning_briefing on success; read by health_ping to gate the ping.
-_pipeline_ok: bool = False
 
 
 # ── failure alert ─────────────────────────────────────────────────────────────
@@ -60,6 +57,28 @@ async def _send_failure_alert(exc: Exception) -> None:
 
 
 # ── jobs ──────────────────────────────────────────────────────────────────────
+
+async def _morning_briefing_async() -> None:
+    logger.info("Job [morning_briefing] starting")
+    try:
+        result = await run(save=True, notify=True)
+        logger.info(
+            f"Job [morning_briefing] finished OK — "
+            f"bias={result['bias']['direction']} ({result['bias']['strength']}), "
+            f"stocks={len(result['stocks'])}"
+        )
+        url = settings.healthcheck_scraper_url
+        if url:
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(url, timeout=10.0)
+                logger.info(f"Job [morning_briefing] healthcheck pinged — HTTP {resp.status_code}")
+            except Exception as ping_exc:
+                logger.error(f"Job [morning_briefing] healthcheck ping failed: {ping_exc}")
+    except Exception as exc:
+        logger.error(f"Job [morning_briefing] FAILED: {exc}")
+        await _send_failure_alert(exc)
+
 
 async def outcome_fetcher_job() -> None:
     logger.info("Job [outcome_fetcher] starting")
@@ -94,74 +113,20 @@ async def instrument_master_refresh_job() -> None:
         await _send_failure_alert(exc)
 
 
-async def morning_briefing_job() -> None:
-    global _pipeline_ok
-    _pipeline_ok = False
-    logger.info("Job [morning_briefing] starting")
-
-    try:
-        # _run_pipeline is sync and calls asyncio.run() internally.
-        # Run it in a thread executor so it gets its own event loop.
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: _run_pipeline(save=True, notify=True),
-        )
-        _pipeline_ok = True
-        logger.info(
-            f"Job [morning_briefing] finished OK -- "
-            f"bias={result['bias']['direction']} ({result['bias']['strength']}), "
-            f"stocks={len(result['stocks'])}"
-        )
-    except Exception as exc:
-        logger.error(f"Job [morning_briefing] FAILED: {exc}")
-        await _send_failure_alert(exc)
-        # Do not re-raise — scheduler must survive job failures
-
-
-async def health_ping_job() -> None:
-    if not _pipeline_ok:
-        logger.warning("Job [health_ping] skipping -- pipeline did not succeed this morning")
-        return
-
-    url = settings.healthcheck_scraper_url
-    if not url:
-        logger.debug("Job [health_ping] skipping -- HEALTHCHECK_SCRAPER_URL not configured")
-        return
-
-    logger.info(f"Job [health_ping] pinging {url}")
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, timeout=10.0)
-        logger.info(f"Job [health_ping] ok -- HTTP {resp.status_code}")
-    except Exception as exc:
-        logger.error(f"Job [health_ping] ping failed: {exc}")
-
-
 # ── scheduler loop ────────────────────────────────────────────────────────────
 
-async def _scheduler_loop() -> None:
+async def main() -> None:
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
 
     scheduler.add_job(
-        morning_briefing_job,
-        "cron",
-        day_of_week="mon-fri",
-        hour=8,
-        minute=45,
+        _morning_briefing_async,
+        trigger=CronTrigger(hour=8, minute=45, day_of_week="mon-fri", timezone="Asia/Kolkata"),
         id="morning_briefing",
         name="Morning pipeline run",
+        misfire_grace_time=300,
+        coalesce=True,
+        max_instances=1,
     )
-    scheduler.add_job(
-        health_ping_job,
-        "cron",
-        day_of_week="mon-fri",
-        hour=8,
-        minute=50,
-        id="health_ping",
-        name="Healthchecks.io ping",
-    )
-    # Outcome fetcher — 15:45 IST = 10:15 UTC, weekdays
     scheduler.add_job(
         outcome_fetcher_job,
         CronTrigger(hour=10, minute=15, day_of_week="mon-fri", timezone="UTC"),
@@ -169,7 +134,6 @@ async def _scheduler_loop() -> None:
         name="EOD outcome fetch",
         replace_existing=True,
     )
-    # Edge analyser — every Friday 16:00 IST = 10:30 UTC
     scheduler.add_job(
         edge_analyser_job,
         CronTrigger(day_of_week="fri", hour=10, minute=30, timezone="UTC"),
@@ -177,7 +141,6 @@ async def _scheduler_loop() -> None:
         name="Weekly edge pattern analysis",
         replace_existing=True,
     )
-    # Instrument master refresh — every Sunday 23:30 UTC (Monday 05:00 IST)
     scheduler.add_job(
         instrument_master_refresh_job,
         CronTrigger(day_of_week="sun", hour=23, minute=30, timezone="UTC"),
@@ -185,7 +148,6 @@ async def _scheduler_loop() -> None:
         name="NSE instrument master weekly refresh",
         replace_existing=True,
     )
-    # Extended token expiry warning — every Monday 06:05 IST (00:35 UTC)
     scheduler.add_job(
         check_extended_token_expiry,
         "cron",
@@ -199,19 +161,19 @@ async def _scheduler_loop() -> None:
     )
 
     scheduler.start()
-    logger.info("Scheduler started -- 2 jobs armed (Asia/Kolkata)")
+    next_run = scheduler.get_job("morning_briefing").next_run_time
+    logger.info(f"Scheduler armed ✅ — next run: {next_run}")
     for job in scheduler.get_jobs():
         nxt = job.next_run_time
         ts = nxt.strftime("%Y-%m-%d %H:%M:%S %Z") if nxt else "N/A"
         logger.info(f"  [{job.id}] next run: {ts}")
 
     try:
-        await asyncio.Event().wait()   # block until Ctrl-C / SIGTERM
+        while True:
+            await asyncio.sleep(60)
     except (KeyboardInterrupt, SystemExit):
-        pass
-    finally:
+        logger.info("Scheduler shutting down...")
         scheduler.shutdown()
-        logger.info("Scheduler stopped")
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
@@ -221,9 +183,7 @@ if __name__ == "__main__":
 
     if "--now" in sys.argv:
         logger.info("--now: running morning_briefing immediately")
-        asyncio.run(morning_briefing_job())
-        logger.info("--now: running health_ping immediately")
-        asyncio.run(health_ping_job())
+        asyncio.run(_morning_briefing_async())
         logger.info("--now run complete")
     else:
-        asyncio.run(_scheduler_loop())
+        asyncio.run(main())
