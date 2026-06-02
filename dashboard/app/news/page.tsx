@@ -194,6 +194,7 @@ export default function NewsPage() {
   const [sort,         setSort]         = useState<SortKey>("importance");
   const [sentFilter,   setSentFilter]   = useState<SentKey>("all");
   const [sourceFilter, setSourceFilter] = useState("all");
+  const [showNoise,    setShowNoise]    = useState(false);  // OFF hides importance-1
   const [isDark,       setIsDark]       = useState(true);
 
   const t = isDark ? DARK : LIGHT;
@@ -222,6 +223,7 @@ export default function NewsPage() {
 
   const filtered = useMemo(() => {
     let hs = headlines;
+    if (!showNoise) hs = hs.filter((h) => (h.importance ?? 0) >= 2);
     // Case-insensitive sentiment match — DB may store "Bullish" or "bullish".
     if (sentFilter !== "all")
       hs = hs.filter((h) => sentKey(h.sentiment) === sentFilter);
@@ -240,7 +242,7 @@ export default function NewsPage() {
         return a.source.localeCompare(b.source);
       return 0;
     });
-  }, [headlines, sentFilter, sourceFilter, sort]);
+  }, [headlines, showNoise, sentFilter, sourceFilter, sort]);
 
   const sentPills: { key: SentKey; label: string }[] = [
     { key: "all",     label: "All" },
@@ -272,7 +274,7 @@ export default function NewsPage() {
       fontWeight:      (active ? 600 : 400) as number,
     } as const);
 
-  const filtersActive = sentFilter !== "all" || sourceFilter !== "all";
+  const filtersActive = sentFilter !== "all" || sourceFilter !== "all" || showNoise;
 
   return (
     <div style={{ backgroundColor: t.bg, minHeight: "100vh", padding: "0 0 40px" }}>
@@ -330,6 +332,23 @@ export default function NewsPage() {
           <option value="all">All sources</option>
           {sources.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
+
+        {/* Noise toggle — hides importance-1 headlines by default */}
+        <button
+          onClick={() => setShowNoise((v) => !v)}
+          style={{
+            fontSize:        12,
+            padding:         "4px 12px",
+            borderRadius:    999,
+            border:          `1px solid ${showNoise ? t.accent : t.border}`,
+            backgroundColor: showNoise ? "rgba(124,111,224,0.15)" : "transparent",
+            color:           showNoise ? t.accent : t.muted,
+            cursor:          "pointer",
+            fontWeight:      (showNoise ? 600 : 400) as number,
+          }}
+        >
+          {showNoise ? "● Show noise" : "○ Show noise"}
+        </button>
       </div>
 
       {/* Content */}
@@ -355,7 +374,7 @@ export default function NewsPage() {
           </p>
           {filtersActive && (
             <button
-              onClick={() => { setSentFilter("all"); setSourceFilter("all"); }}
+              onClick={() => { setSentFilter("all"); setSourceFilter("all"); setShowNoise(false); }}
               style={{
                 marginTop: 12, fontSize: 12, padding: "5px 14px",
                 borderRadius: 6, border: `1px solid ${t.border}`,
