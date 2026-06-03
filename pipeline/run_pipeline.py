@@ -1,7 +1,10 @@
 """
 Manual end-to-end pipeline run.
 Chains all five modules: ingest -> normalise -> analyse -> bias -> rank.
-Use this to verify the full pipeline before the scheduler is wired.
+
+Saves to the database by default (same as the scheduled run).
+Pass --no-save for a dry run that prints the briefing without touching Postgres.
+Pass --notify to also send the Telegram message.
 """
 
 import asyncio
@@ -138,7 +141,9 @@ async def run(save: bool = False, notify: bool = False) -> dict:
 
 
 if __name__ == "__main__":
-    save_flag   = "--save"   in sys.argv
-    notify_flag = "--notify" in sys.argv
+    save_flag   = "--no-save" not in sys.argv   # save by default; --no-save for dry run
+    notify_flag = "--notify"  in sys.argv
+    if not save_flag:
+        print("[dry run] --no-save: briefing will NOT be written to the database")
     result = asyncio.run(run(save=save_flag, notify=notify_flag))
     sys.exit(0)
