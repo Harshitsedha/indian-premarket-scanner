@@ -6,10 +6,14 @@ No API calls, no DB calls -- deterministic computation only.
 """
 
 import re
+from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
+
+_IST         = timezone(timedelta(hours=5, minutes=30))
+_MARKET_OPEN = dtime(9, 15)   # NSE cash market opens 09:15 IST
 
 SCAN_WATCHLIST: list[str] = [
     # Large cap — original 20
@@ -223,10 +227,15 @@ def _build_thesis(
 
 def _fetch_stock_gaps(symbols: list[str]) -> dict[str, float]:
     """
-    Fetch real per-stock gap % from Upstox pre-market quotes.
-    Returns dict: symbol -> gap_pct (float).
-    Falls back to empty dict on any error — caller handles the fallback.
+    Fetch real per-stock gap % from Upstox.
+    Before 09:15 IST the LTP endpoint echoes the prior session's close for every
+    symbol, making all gaps compute to exactly 0.0%.  We skip the call in that
+    window so the ranker falls back to the SGX Nifty market proxy instead.
+    Returns empty dict on error or pre-market — caller uses market proxy in both cases.
     """
+    if datetime.now(_IST).time() < _MARKET_OPEN:
+        logger.info("Pre-market (<09:15 IST) — skipping per-stock gap fetch, using market proxy")
+        return {}
     try:
         from ingestion.upstox_client import UpstoxClient
         client = UpstoxClient()

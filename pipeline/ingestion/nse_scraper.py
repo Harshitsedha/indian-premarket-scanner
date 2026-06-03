@@ -12,7 +12,7 @@ FII/DII activity:
 """
 
 import io
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,28 @@ import pandas as pd
 from loguru import logger
 
 # ── constants ─────────────────────────────────────────────────────────────────
+
+_HOLIDAYS_FILE = Path(__file__).resolve().parents[1] / "data" / "nse_holidays.txt"
+
+
+def _load_nse_holidays() -> frozenset[date]:
+    """Load NSE trading holiday dates from the data file. Returns empty set if file absent."""
+    if not _HOLIDAYS_FILE.exists():
+        logger.warning(f"NSE holidays file not found: {_HOLIDAYS_FILE} — only weekends will be skipped")
+        return frozenset()
+    result: set[date] = set()
+    for raw in _HOLIDAYS_FILE.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#")[0].strip()   # strip inline comments
+        if line:
+            try:
+                result.add(date.fromisoformat(line))
+            except ValueError:
+                logger.warning(f"nse_holidays.txt: unreadable line '{raw.strip()}' — skipped")
+    logger.debug(f"NSE holidays loaded: {len(result)} dates from {_HOLIDAYS_FILE.name}")
+    return frozenset(result)
+
+
+_NSE_HOLIDAYS: frozenset[date] = _load_nse_holidays()
 
 BHAVCOPY_URL = (
     "https://nsearchives.nseindia.com/content/cm/"
@@ -56,11 +78,22 @@ MAX_ROWS = 2000
 
 # ── date helpers ──────────────────────────────────────────────────────────────
 
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
 def _prev_trading_day(from_date: date) -> date:
-    """Step back one calendar day, then skip over Saturday/Sunday."""
+    """Step back one calendar day, skipping weekends and NSE holidays."""
     d = from_date - timedelta(days=1)
-    while d.weekday() in (5, 6):   # 5=Sat, 6=Sun
+    while d.weekday() in (5, 6) or d in _NSE_HOLIDAYS:
         d -= timedelta(days=1)
+    return d
+
+
+def _next_trading_day(from_date: date) -> date:
+    """Step forward one calendar day, skipping weekends and NSE holidays."""
+    d = from_date + timedelta(days=1)
+    while d.weekday() in (5, 6) or d in _NSE_HOLIDAYS:
+        d += timedelta(days=1)
     return d
 
 
@@ -203,14 +236,25 @@ def fetch_nse_data() -> dict[str, Any]:
         upstox_date = None
 
     if upstox_date:
-        trading_date = date.fromisoformat(upstox_date)
+        # Upstox historical-candle returns the last *completed* session.
+        # _next_trading_day advances by one day, skipping weekends and NSE
+        # holidays loaded from pipeline/data/nse_holidays.txt.
+        # This correctly handles: running on a holiday (prev_close = pre-holiday
+        # session; +1 skips holiday → actual next session), day after holiday,
+        # and weekend boundaries.
+        prev_session = date.fromisoformat(upstox_date)
+        trading_date = _next_trading_day(prev_session)
+        logger.info(f"Trading date: {trading_date} (next session after prev_close {prev_session})")
     else:
-        trading_date = _prev_trading_day(date.today())
-        logger.warning(
-            f"Upstox trading date unavailable — falling back to calendar estimate: {trading_date}"
-        )
-
-    logger.info(f"Trading date: {trading_date}")
+        # Upstox unavailable — fall back to IST wall clock + holiday skip.
+        # Less reliable than the Upstox anchor: correct on trading days, but
+        # returns the holiday date itself when the pipeline runs on a holiday
+        # and Upstox is also down simultaneously.
+        today_ist = datetime.now(_IST).date()
+        trading_date = today_ist
+        while trading_date.weekday() in (5, 6) or trading_date in _NSE_HOLIDAYS:
+            trading_date += timedelta(days=1)
+        logger.warning(f"Upstox trading date unavailable — falling back to calendar estimate: {trading_date}")
 
     # ── FII/DII from NSE (this endpoint still works) ──────────────────────────
     with httpx.Client(

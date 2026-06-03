@@ -1,0 +1,42 @@
+# NSE equity market trading holidays — one ISO date per line.
+# Source: official NSE circular NSE/CMTR/71775, dated December 12, 2025.
+# Update this file each December when NSE publishes the following year's circular.
+# Lines beginning with # are ignored. Inline # comments are stripped by the loader.
+# Only weekday closures are listed — Saturday/Sunday dates are omitted because
+# the weekend-skip logic in _next_trading_day already handles them.
+
+# ── 2025 ──────────────────────────────────────────────────────────────────────
+# Source: NSE circular for 2025 (verify exact dates against that circular).
+2025-02-26   # Mahashivratri        (Wednesday)
+2025-03-14   # Holi                 (Friday)
+2025-04-14   # Dr. Ambedkar Jayanti (Monday)
+2025-04-18   # Good Friday          (Friday)
+2025-05-01   # Maharashtra Day      (Thursday)
+2025-08-15   # Independence Day     (Friday)
+2025-08-27   # Ganesh Chaturthi     (Wednesday)
+2025-10-02   # Gandhi Jayanti / Dussehra (Thursday)
+2025-10-20   # Diwali – Laxmi Pujan      (Monday)
+2025-10-21   # Diwali – Balipratipada    (Tuesday)
+2025-11-05   # Gurunanak Jayanti    (Wednesday)
+2025-12-25   # Christmas            (Thursday)
+
+# ── 2026 ──────────────────────────────────────────────────────────────────────
+# Source: NSE/CMTR/71775, December 12, 2025. All 15 weekday entries from page 1.
+# Weekend dates from page 2 (Feb 15 Sun, Mar 21 Sat, Aug 15 Sat, Nov 8 Sun) omitted.
+# Nov 8 Diwali Muhurat Trading is a Sunday special session — not a closure; omitted.
+# Refresh this section in December 2026 for the 2027 circular.
+2026-01-26   # Republic Day                      (Monday)
+2026-03-03   # Holi                              (Tuesday)
+2026-03-26   # Shri Ram Navami                   (Thursday)
+2026-03-31   # Shri Mahavir Jayanti              (Tuesday)
+2026-04-03   # Good Friday                       (Friday)
+2026-04-14   # Dr. Baba Saheb Ambedkar Jayanti   (Tuesday)
+2026-05-01   # Maharashtra Day                   (Friday)
+2026-05-28   # Bakri Id                          (Thursday)
+2026-06-26   # Muharram                          (Friday)
+2026-09-14   # Ganesh Chaturthi                  (Monday)
+2026-10-02   # Mahatma Gandhi Jayanti            (Friday)
+2026-10-20   # Dussehra                          (Tuesday)
+2026-11-10   # Diwali-Balipratipada              (Tuesday)
+2026-11-24   # Prakash Gurpurb Sri Guru Nanak Dev (Tuesday)
+2026-12-25   # Christmas                         (Friday)
