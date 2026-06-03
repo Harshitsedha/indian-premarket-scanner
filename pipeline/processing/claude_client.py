@@ -17,6 +17,8 @@ from tenacity import (
     wait_fixed,
 )
 
+from processing.tagging_universe import TAGGING_UNIVERSE_SET
+
 # CLAUDE_MODEL is a plain constant in config — safe to import without a .env
 try:
     from utils.config import CLAUDE_MODEL
@@ -49,13 +51,16 @@ _JSON_SCHEMA = """{
       "id": 1,
       "sentiment": "bullish|bearish|neutral",
       "importance": 3,
-      "reason": "5-8 words"
+      "reason": "5-8 words",
+      "symbols": ["RELIANCE"]
     }
   ]
 }"""
 
 # confidence: 1-5  (5 = very high conviction)
 # importance: 1-5  (5 = market-moving, 4 = significant, 3 = moderate, 2 = minor, 1 = noise)
+# symbols: NSE trading symbols explicitly mentioned in the headline; [] if none
+#          (validated against TAGGING_UNIVERSE_SET after parsing — unknowns are dropped)
 
 _SYSTEM_EDGE = (
     "You are a pre-market edge analyst. "
@@ -108,6 +113,9 @@ def _build_news_prompt(headlines: list[dict[str, Any]]) -> str:
         f"{body}\n\n"
         "importance scale: 5=market-moving, 4=significant, 3=moderate, 2=minor, 1=noise\n"
         "confidence scale: 1-5 (5=very high conviction)\n\n"
+        "For 'symbols': return NSE trading symbols (e.g. RELIANCE, TCS, INFY) explicitly "
+        "mentioned in the headline by company name or ticker. Use exact NSE format — "
+        "uppercase, no exchange prefix. Return [] if no specific company is mentioned.\n\n"
         f"Return ONLY this JSON (no other text):\n{_JSON_SCHEMA}"
     )
 
@@ -177,6 +185,18 @@ def analyse_news(headlines: list[dict[str, Any]]) -> dict[str, Any]:
         logger.error(f"Claude response parse error: {exc}")
         raise ClaudeClientError(f"JSON parse failed: {exc}") from exc
 
+    # Hard-validate symbols: drop anything not in the tagging universe.
+    # This is the authoritative filter — prompt alone cannot prevent hallucinations.
+    for h in result.get("headlines") or []:
+        raw_syms = h.get("symbols")
+        if isinstance(raw_syms, list):
+            h["symbols"] = [
+                s.upper() for s in raw_syms
+                if isinstance(s, str) and s.upper() in TAGGING_UNIVERSE_SET
+            ]
+        else:
+            h["symbols"] = []
+
     return result
 
 
@@ -240,7 +260,9 @@ if __name__ == "__main__":
     print(f"Reason       : {bias.get('reason', '?')}")
     print(f"\nPer-headline breakdown:")
     for h in result.get("headlines", []):
+        syms = h.get("symbols") or []
         print(
             f"  [{h.get('id'):>2}] {h.get('sentiment'):8}  "
-            f"importance={h.get('importance')}  {h.get('reason', '')}"
+            f"importance={h.get('importance')}  {h.get('reason', '')}  "
+            f"symbols={syms}"
         )

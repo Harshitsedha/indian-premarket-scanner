@@ -349,7 +349,7 @@ def _news_for_date(target: date) -> dict:
             cur.execute(
                 """
                 SELECT h.id, h.source, h.headline, h.url, h.sentiment,
-                       h.importance, h.reason, h.scraped_at
+                       h.importance, h.reason, h.symbols, h.scraped_at
                 FROM headlines h
                 JOIN daily_briefings b ON b.id = h.briefing_id
                 WHERE b.trading_date = %s

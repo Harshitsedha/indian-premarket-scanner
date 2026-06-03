@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -60,6 +61,7 @@ class Headline(Base):
     sentiment:   Mapped[Optional[str]]  = mapped_column(String(16), nullable=True)
     importance:  Mapped[Optional[int]]  = mapped_column(Integer, nullable=True)
     reason:      Mapped[Optional[str]]  = mapped_column(Text, nullable=True)
+    symbols:     Mapped[list]           = mapped_column(JSONB, nullable=False, default=list, server_default="'[]'")
     scraped_at:  Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at:  Mapped[datetime]       = mapped_column(DateTime(timezone=True), nullable=False)
 

@@ -12,6 +12,7 @@ type Headline = {
   sentiment: string | null;
   importance: number | null;
   reason: string | null;
+  symbols: string[] | null;
   scraped_at: string | null;
 };
 
@@ -164,6 +165,30 @@ function HeadlineCard({ h, t }: { h: Headline; t: Theme }) {
         <p style={{ color: t.muted, fontSize: 12, lineHeight: 1.4, fontStyle: "italic", margin: 0 }}>
           {h.reason}
         </p>
+      )}
+
+      {/* Ticker chips */}
+      {h.symbols && h.symbols.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+          {h.symbols.map((sym) => (
+            <span
+              key={sym}
+              style={{
+                fontSize: 10,
+                fontFamily: "monospace",
+                fontWeight: 600,
+                padding: "1px 6px",
+                borderRadius: 4,
+                border: `1px solid ${t.border}`,
+                color: t.muted,
+                backgroundColor: t.inputBg,
+                letterSpacing: "0.04em",
+              }}
+            >
+              {sym}
+            </span>
+          ))}
+        </div>
       )}
 
       {/* Sentiment badge + time */}

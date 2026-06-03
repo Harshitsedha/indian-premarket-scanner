@@ -162,6 +162,9 @@ async def save_briefing(
             except ValueError:
                 scraped_at = None
 
+            raw_symbols = claude_entry.get("symbols")
+            symbols = raw_symbols if isinstance(raw_symbols, list) else []
+
             session.add(Headline(
                 briefing_id = briefing.id,
                 source      = str(h.get("source") or ""),
@@ -170,6 +173,7 @@ async def save_briefing(
                 sentiment   = claude_entry.get("sentiment"),
                 importance  = claude_entry.get("importance"),
                 reason      = claude_entry.get("reason"),
+                symbols     = symbols,
                 scraped_at  = scraped_at,
                 created_at  = now,
             ))

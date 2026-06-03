@@ -1,6 +1,6 @@
 """
 Stock ranking layer for pre-market briefing.
-Scores WATCHLIST stocks from four independent signals and returns
+Scores SCAN_WATCHLIST stocks from four independent signals and returns
 the top-7 candidates with setup classification.
 No API calls, no DB calls -- deterministic computation only.
 """
@@ -11,7 +11,7 @@ from typing import Any
 
 from loguru import logger
 
-WATCHLIST: list[str] = [
+SCAN_WATCHLIST: list[str] = [
     # Large cap — original 20
     "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
     "HINDUNILVR", "ITC", "SBIN", "BHARTIARTL", "KOTAKBANK",
@@ -243,7 +243,7 @@ def rank_stocks(
     use_live_gaps: bool = True,
 ) -> list[dict[str, Any]]:
     """
-    Score and rank WATCHLIST stocks from four independent signals.
+    Score and rank SCAN_WATCHLIST stocks from four independent signals.
 
     Args:
         normalised:      output of normaliser.normalise()
@@ -262,7 +262,7 @@ def rank_stocks(
     # Attempt live per-stock gaps from Upstox — fall back to market proxy
     stock_gaps: dict[str, float] = {}
     if use_live_gaps:
-        stock_gaps = _fetch_stock_gaps(WATCHLIST)
+        stock_gaps = _fetch_stock_gaps(SCAN_WATCHLIST)
         if stock_gaps:
             logger.info(f"Live stock gaps loaded for {len(stock_gaps)} symbols")
         else:
@@ -270,7 +270,7 @@ def rank_stocks(
 
     scored: list[dict[str, Any]] = []
 
-    for symbol in WATCHLIST:
+    for symbol in SCAN_WATCHLIST:
         # Headlines that mention this stock
         matching = [h for h in headlines if _mentions_stock(symbol, h.get("headline", ""))]
         mention_count = len(matching)
@@ -355,7 +355,7 @@ def rank_stocks(
     top_symbols = [e["symbol"] for e in result[:3]]
     gap_source = "live" if stock_gaps else "proxy"
     logger.info(
-        f"Ranker: {len(scored)}/{len(WATCHLIST)} stocks scored > 0, "
+        f"Ranker: {len(scored)}/{len(SCAN_WATCHLIST)} stocks scored > 0, "
         f"top 3: {top_symbols}  "
         f"(market_gap={gap_pct:+.2f}%, fii={fii_dir}, gap_source={gap_source})"
     )
