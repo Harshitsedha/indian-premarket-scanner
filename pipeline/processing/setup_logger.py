@@ -79,8 +79,8 @@ def log_setups(
                             stock.get("sentiment"),           # hypothesis = expected direction
                             bias_direction,
                             bias_confidence,
-                            signals.get("gap_pct"),
-                            signals.get("gap_source"),
+                            signals.get("prior_session_gap_pct"),  # stored in gap_pct DB column
+                            signals.get("move_source"),          # stored in gap_source DB column
                             stock.get("score"),
                             psycopg2.extras.Json(signals),
                             stock.get("thesis"),

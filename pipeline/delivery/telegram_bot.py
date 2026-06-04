@@ -88,12 +88,12 @@ def _build_message(
         setup  = html.escape(str(s.get("setup_type", "")))
         thesis = html.escape(str(s.get("thesis", "")))
         sig       = s.get("signals") or {}
-        stock_gap = float(sig.get("gap_pct", 0.0))
-        gap_src   = str(sig.get("gap_source", "proxy"))
-        stk_score = float(s.get("score", 0.0))
+        stock_move = float(sig.get("prior_session_gap_pct", 0.0))
+        move_src   = str(sig.get("move_source", "historical_gap"))
+        stk_score  = float(s.get("score", 0.0))
         lines.append(f"{rank}. <b>{symbol}</b> — {_emoji(sent)} {html.escape(sent)} · {setup}")
         lines.append(f"   <i>{thesis}</i>")
-        lines.append(f"   <i>score={stk_score:.2f} · gap={stock_gap:+.1f}% ({gap_src})</i>")
+        lines.append(f"   <i>score={stk_score:.2f} · move={stock_move:+.1f}% ({move_src})</i>")
 
     return "\n".join(lines)
 

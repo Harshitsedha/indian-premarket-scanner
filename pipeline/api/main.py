@@ -186,16 +186,16 @@ def briefing_today():
 
     stocks_out = [
         {
-            "rank":          r.get("rank"),
-            "symbol":        r["symbol"],
-            "sentiment":     r["sentiment"],
-            "setup_type":    r["setup_type"],
-            "thesis":        r["thesis"],
-            "score":         r["score"],
-            "gap_pct":       r["gap_pct"],
-            "gap_source":    r["gap_source"],
-            "mention_count": r.get("mention_count") or 0,
-            "signals":       r["signals"] or {},
+            "rank":               r.get("rank"),
+            "symbol":             r["symbol"],
+            "sentiment":          r["sentiment"],
+            "setup_type":         r["setup_type"],
+            "thesis":             r["thesis"],
+            "score":              r["score"],
+            "prior_session_gap_pct": r["gap_pct"],     # DB column is gap_pct; field renamed
+            "move_source":        r["gap_source"],  # DB column is gap_source; field renamed
+            "mention_count":      r.get("mention_count") or 0,
+            "signals":            r["signals"] or {},
         }
         for r in stocks_rows
     ]
@@ -297,10 +297,10 @@ def setups_for_date(date_str: str):
             "setup_type": r["setup_type"],
             "hypothesis": r["hypothesis"],
             "score":      r["score"],
-            "gap_pct":    r["gap_pct"],
-            "gap_source": r["gap_source"],
-            "signals":    r["signals"] or {},
-            "thesis":     r["thesis"],
+            "prior_session_gap_pct": r["gap_pct"],     # DB column is gap_pct; field renamed
+            "move_source":        r["gap_source"],  # DB column is gap_source; field renamed
+            "signals":            r["signals"] or {},
+            "thesis":             r["thesis"],
             "outcome":    {
                 "move_pct":           r["move_pct"],
                 "hypothesis_correct": r["hypothesis_correct"],

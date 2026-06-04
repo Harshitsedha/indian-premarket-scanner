@@ -3,8 +3,9 @@ upstox_client.py — Upstox v2 API wrapper.
 
 Public interface:
     client = UpstoxClient()
-    client.get_prev_close("RELIANCE")     -> dict | None
-    client.get_premarket_quote("RELIANCE") -> dict | None
+    client.get_prev_close("RELIANCE")        -> dict | None
+    client.get_prior_session_gap("RELIANCE") -> dict | None
+    client.get_premarket_quote("RELIANCE")   -> dict | None
     client.get_bulk_quotes(["RELIANCE", "INFY"]) -> list[dict]
     client.get_ohlcv_history("RELIANCE", days=20) -> list[dict]
 
@@ -76,13 +77,13 @@ def _send_401_alert() -> None:
 class UpstoxClient:
     def __init__(self) -> None:
         token = _get_bearer_token()
-        self._http = httpx.Client(
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/json",
-            },
-            timeout=15,
-        )
+        # Only set Authorization when a token is present; historical-candle endpoints
+        # work without authentication, so an empty-token header would just cause httpx
+        # to raise LocalProtocolError before any request is sent.
+        headers: dict[str, str] = {"Accept": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        self._http = httpx.Client(headers=headers, timeout=15)
 
     # ── Internal request handler ──────────────────────────────────────────────
 
@@ -159,6 +160,45 @@ class UpstoxClient:
 
         return self._parse_candle(symbol, candles[0])
 
+    def get_prior_session_gap(self, symbol: str) -> dict | None:
+        """
+        Prior-session gap: (yesterday_open - day_before_close) / day_before_close * 100.
+        This is the true opening gap of the most recent completed session versus the
+        prior session's close — it is NOT a close-over-close move.
+        Uses the tokenless historical-candle endpoint; returns None if fewer than 2
+        completed candles are available.
+        """
+        key = get_instrument_token(symbol)
+        if not key:
+            logger.warning(f"Symbol not in instrument master: {symbol}")
+            return None
+
+        today     = date.today()
+        to_date   = today.strftime("%Y-%m-%d")
+        from_date = (today - timedelta(days=7)).strftime("%Y-%m-%d")  # buffer for weekends/holidays
+        url = f"{_BASE}/historical-candle/{self._encode_key(key)}/day/{to_date}/{from_date}"
+
+        body = self._get(url)
+        if not body:
+            return None
+
+        candles = body.get("data", {}).get("candles", [])
+        if len(candles) < 2:
+            logger.warning(f"Fewer than 2 candles for {symbol} — prior_session_gap unavailable")
+            return None
+
+        yesterday  = self._parse_candle(symbol, candles[0])
+        day_before = self._parse_candle(symbol, candles[1])
+        gap_pct    = round(
+            (yesterday["open"] - day_before["close"]) / day_before["close"] * 100, 2
+        )
+        return {
+            "symbol":               symbol.upper(),
+            "yesterday_open":       yesterday["open"],
+            "day_before_close":     day_before["close"],
+            "prior_session_gap_pct": gap_pct,
+        }
+
     def get_premarket_quote(self, symbol: str) -> dict | None:
         """Live LTP with gap_pct vs prev close. Falls back gracefully when market is closed."""
         key = get_instrument_token(symbol)
@@ -229,12 +269,25 @@ class UpstoxClient:
         if not key_to_symbol:
             return []
 
-        # Comma-separated, both pipe and comma encoded
-        encoded_keys = "%2C".join(self._encode_key(k) for k in key_to_symbol)
+        # Upstox v2 expects raw commas between instrument keys, pipe encoded as %7C.
+        # Using %2C (encoded comma) as the separator makes the server treat the entire
+        # string as one unknown key, returning empty data for all symbols.
+        encoded_keys = ",".join(self._encode_key(k) for k in key_to_symbol)
         url  = f"{_BASE}/market-quote/ltp?instrument_key={encoded_keys}"
         body = self._get(url)
 
-        quote_data = body.get("data", {}) if body else {}
+        raw_data = body.get("data", {}) if body else {}
+
+        # Upstox may return keys with pipe (|) or encoded-pipe (%7C) — normalise to pipe.
+        quote_data: dict[str, dict] = {
+            k.replace("%7C", "|").replace("%7c", "|"): v
+            for k, v in raw_data.items()
+        }
+
+        logger.debug(
+            f"Bulk LTP: requested {len(key_to_symbol)} symbols, "
+            f"got {len(quote_data)} entries in response"
+        )
 
         results: list[dict] = []
         for ikey, sym in key_to_symbol.items():

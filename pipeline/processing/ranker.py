@@ -6,6 +6,7 @@ No API calls, no DB calls -- deterministic computation only.
 """
 
 import re
+import time
 from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -184,13 +185,13 @@ def _dominant_sentiment(claude_entries: list[dict[str, Any]]) -> str:
 
 
 def _setup_type(
-    mention_score: float, fii_score: float, gap_score: float
+    mention_score: float, fii_score: float, move_score: float
 ) -> str:
     if mention_score > 0.3:
         return "news_catalyst"
     if fii_score == 1.0 and mention_score == 0.0:
         return "fii_driven"
-    if gap_score > 0.5 and mention_score == 0.0:
+    if move_score > 0.5 and mention_score == 0.0:
         return "gap_play"
     return "watchlist"
 
@@ -200,7 +201,7 @@ def _build_thesis(
     setup_type: str,
     mention_count: int,
     top_reason: str | None,
-    gap_pct: float,
+    move_pct: float,
     fii_dir: str,
     sentiment: str,
 ) -> str:
@@ -217,32 +218,52 @@ def _build_thesis(
         )
     if setup_type == "gap_play":
         return (
-            f"No headline mention; {abs(gap_pct):.1f}% market gap "
-            f"creates breakout setup for {display}"
+            f"No headline mention; {abs(move_pct):.1f}% prior-session gap "
+            f"sets up momentum trade for {display}"
         )
     return f"{display} on watchlist; no strong catalyst identified"
 
 
 # -- public API ---------------------------------------------------------------
 
-def _fetch_stock_gaps(symbols: list[str]) -> dict[str, float]:
+def _fetch_prior_session_gaps(symbols: list[str]) -> dict[str, float]:
     """
-    Fetch real per-stock gap % from Upstox.
-    Before 09:15 IST the LTP endpoint echoes the prior session's close for every
-    symbol, making all gaps compute to exactly 0.0%.  We skip the call in that
-    window so the ranker falls back to the SGX Nifty market proxy instead.
-    Returns empty dict on error or pre-market — caller uses market proxy in both cases.
+    Prior-session gap for each symbol from historical candles.
+    (yesterday_open - day_before_close) / day_before_close * 100
+
+    Uses the tokenless historical-candle endpoint — works at pre-open (08:45 IST)
+    and whenever the live token is absent.  Falls back gracefully per symbol if
+    fewer than 2 candles are available; returns {} on total failure.
     """
-    if datetime.now(_IST).time() < _MARKET_OPEN:
-        logger.info("Pre-market (<09:15 IST) — skipping per-stock gap fetch, using market proxy")
+    try:
+        from ingestion.upstox_client import UpstoxClient
+        client = UpstoxClient()
+        gaps: dict[str, float] = {}
+        for sym in symbols:
+            result = client.get_prior_session_gap(sym)
+            if result is not None:
+                gaps[sym.upper()] = result["prior_session_gap_pct"]
+            time.sleep(0.05)
+        logger.info(f"Prior-session gaps loaded for {len(gaps)}/{len(symbols)} symbols")
+        return gaps
+    except Exception as e:
+        logger.warning(f"Prior-session gap fetch failed: {e}")
         return {}
+
+
+def _fetch_live_gaps(symbols: list[str]) -> dict[str, float]:
+    """
+    Live opening gap % from Upstox LTP (requires a valid token, post-09:15 IST only).
+    Returns empty dict when the token is absent or the call fails — caller falls
+    back to prior_day_moves.
+    """
     try:
         from ingestion.upstox_client import UpstoxClient
         client = UpstoxClient()
         quotes = client.get_bulk_quotes(symbols)
         return {q["symbol"]: q["gap_pct"] for q in quotes if q is not None}
     except Exception as e:
-        logger.warning(f"Upstox gap fetch failed, falling back to market proxy: {e}")
+        logger.warning(f"Live gap fetch failed: {e}")
         return {}
 
 
@@ -263,19 +284,31 @@ def rank_stocks(
         Each entry: {rank, symbol, score, mention_count, sentiment,
                      setup_type, thesis, signals{...}}
     """
-    headlines   = normalised.get("headlines") or []
-    claude_map  = _build_claude_map(claude_analysis)
-    gap_pct     = _market_gap_pct(normalised)
-    fii_dir     = _fii_direction(str(normalised.get("fii_dii_summary") or ""))
+    headlines        = normalised.get("headlines") or []
+    claude_map       = _build_claude_map(claude_analysis)
+    market_proxy_pct = _market_gap_pct(normalised)   # SGX Nifty — last-resort fallback
+    fii_dir          = _fii_direction(str(normalised.get("fii_dii_summary") or ""))
 
-    # Attempt live per-stock gaps from Upstox — fall back to market proxy
-    stock_gaps: dict[str, float] = {}
+    # Signal priority (highest → lowest):
+    #   1. live_gaps          — real opening gap from Upstox LTP (post-09:15, token required)
+    #   2. prior_session_gaps — (yesterday_open - day_before_close) / day_before_close (tokenless)
+    #   3. market_proxy_pct   — SGX Nifty index move (last resort when both above fail)
+
+    prior_session_gaps: dict[str, float] = {}
+    live_gaps:          dict[str, float] = {}
+
     if use_live_gaps:
-        stock_gaps = _fetch_stock_gaps(SCAN_WATCHLIST)
-        if stock_gaps:
-            logger.info(f"Live stock gaps loaded for {len(stock_gaps)} symbols")
-        else:
-            logger.warning("Live gaps unavailable — using market-wide SGX proxy for all stocks")
+        prior_session_gaps = _fetch_prior_session_gaps(SCAN_WATCHLIST)
+
+        if datetime.now(_IST).time() >= _MARKET_OPEN:
+            live_gaps = _fetch_live_gaps(SCAN_WATCHLIST)
+            if live_gaps:
+                logger.info(f"Live opening gaps loaded for {len(live_gaps)} symbols")
+            else:
+                logger.info("Live gaps unavailable — using prior-session gaps")
+
+    if not prior_session_gaps and not live_gaps:
+        logger.warning("Both live gaps and prior-session gaps unavailable — using market proxy for all")
 
     scored: list[dict[str, Any]] = []
 
@@ -291,9 +324,18 @@ def rank_stocks(
             if h.get("id") in claude_map
         ]
 
-        # Per-stock gap: use real Upstox data if available, else fall back to market proxy
-        stock_gap_pct   = stock_gaps.get(symbol, gap_pct)
-        stock_gap_score = min(abs(stock_gap_pct) / 3.0, 1.0)
+        # Per-stock momentum signal — prefer live gap, then prior-session gap, then proxy
+        if symbol in live_gaps:
+            stock_move_pct = live_gaps[symbol]
+            move_source    = "live"
+        elif symbol in prior_session_gaps:
+            stock_move_pct = prior_session_gaps[symbol]
+            move_source    = "historical_gap"
+        else:
+            stock_move_pct = market_proxy_pct
+            move_source    = "proxy"
+
+        stock_move_score = min(abs(stock_move_pct) / 3.0, 1.0)
 
         # Signal: news mention (0-1)
         mention_score = min(mention_count / 3.0, 1.0)
@@ -319,7 +361,7 @@ def rank_stocks(
         final = round(
             mention_score      * 0.35
             + importance_score * 0.30
-            + stock_gap_score  * 0.20
+            + stock_move_score * 0.20
             + fii_score        * 0.15,
             4,
         )
@@ -327,7 +369,7 @@ def rank_stocks(
         if final <= 0:
             continue
 
-        setup = _setup_type(mention_score, fii_score, stock_gap_score)
+        setup = _setup_type(mention_score, fii_score, stock_move_score)
 
         top_reason: str | None = None
         if claude_entries:
@@ -335,7 +377,7 @@ def rank_stocks(
             top_reason = best.get("reason")
 
         thesis = _build_thesis(
-            symbol, setup, mention_count, top_reason, stock_gap_pct, fii_dir, sentiment
+            symbol, setup, mention_count, top_reason, stock_move_pct, fii_dir, sentiment
         )
 
         scored.append({
@@ -346,12 +388,12 @@ def rank_stocks(
             "setup_type":    setup,
             "thesis":        thesis,
             "signals": {
-                "news_mention":  round(mention_score,    4),
-                "importance":    round(importance_score, 4),
-                "gap_potential": round(stock_gap_score,  4),
-                "fii_alignment": round(fii_score,        4),
-                "gap_pct":       round(stock_gap_pct,    2),
-                "gap_source":    "live" if symbol in stock_gaps else "proxy",
+                "news_mention":          round(mention_score,    4),
+                "importance":            round(importance_score, 4),
+                "move_score":            round(stock_move_score, 4),
+                "fii_alignment":         round(fii_score,        4),
+                "prior_session_gap_pct": round(stock_move_pct,   2),
+                "move_source":           move_source,
             },
         })
 
@@ -362,11 +404,16 @@ def rank_stocks(
     result = [{"rank": idx, **entry} for idx, entry in enumerate(top, 1)]
 
     top_symbols = [e["symbol"] for e in result[:3]]
-    gap_source = "live" if stock_gaps else "proxy"
+    if live_gaps:
+        overall_source = "live"
+    elif prior_session_gaps:
+        overall_source = "historical_gap"
+    else:
+        overall_source = "proxy"
     logger.info(
         f"Ranker: {len(scored)}/{len(SCAN_WATCHLIST)} stocks scored > 0, "
         f"top 3: {top_symbols}  "
-        f"(market_gap={gap_pct:+.2f}%, fii={fii_dir}, gap_source={gap_source})"
+        f"(market_proxy={market_proxy_pct:+.2f}%, fii={fii_dir}, move_source={overall_source})"
     )
     return result
 
@@ -433,7 +480,7 @@ if __name__ == "__main__":
         print(
             f"      signals  : mention={sig['news_mention']:.2f}  "
             f"importance={sig['importance']:.2f}  "
-            f"gap={sig['gap_potential']:.2f}  "
+            f"move={sig['move_score']:.2f}  "
             f"fii={sig['fii_alignment']:.2f}"
         )
 
