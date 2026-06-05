@@ -24,7 +24,7 @@ if str(_PIPELINE) not in sys.path:
 import anthropic
 from loguru import logger
 
-from utils.config import CLAUDE_MODEL
+from utils.config import CLAUDE_MODEL, settings
 
 
 # ── JSON extraction (inlined to avoid claude_client dependency chain) ─────────
@@ -139,7 +139,7 @@ def validate_strategy(code: str) -> dict:
     """
     user_msg = f"Validate this strategy class:\n\n```python\n{code}\n```"
 
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     logger.info(f"validate_strategy: calling {CLAUDE_MODEL}")
 
     for attempt in range(2):

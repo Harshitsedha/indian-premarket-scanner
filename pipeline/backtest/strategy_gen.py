@@ -20,7 +20,7 @@ if str(_PIPELINE) not in sys.path:
 import anthropic
 from loguru import logger
 
-from utils.config import CLAUDE_MODEL
+from utils.config import CLAUDE_MODEL, settings
 
 
 _SYSTEM = """\
@@ -161,7 +161,7 @@ def generate_strategy(description: str, existing_code: str | None = None) -> str
             "No imports, no markdown, no explanation."
         )
 
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     logger.info(f"generate_strategy: calling {CLAUDE_MODEL}")
     try:
         response = client.messages.create(
