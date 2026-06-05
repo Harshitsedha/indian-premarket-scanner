@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import inspect
 import math
 import sys
 from datetime import date, datetime
@@ -394,7 +395,8 @@ def run_single(
             f"{symbol}: {len(ca_events)} CA event(s) detected — aborted (strict_ca)."
         )
 
-    strategy_obj = strategy_cls(**(strategy_params or {}))
+    _valid = inspect.signature(strategy_cls.__init__).parameters
+    strategy_obj = strategy_cls(**{k: v for k, v in (strategy_params or {}).items() if k in _valid})
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -508,7 +510,8 @@ def run_multi(
         if candles.empty:
             continue
         try:
-            strat = strategy_cls(**(strategy_params or {}))   # fresh instance per symbol
+            _valid = inspect.signature(strategy_cls.__init__).parameters
+            strat = strategy_cls(**{k: v for k, v in (strategy_params or {}).items() if k in _valid})
             if resolved_features is not None:
                 trades, candidates = run_and_record(candles, strat, symbol, resolved_features)
                 all_candidates.extend(candidates)
