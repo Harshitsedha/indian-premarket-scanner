@@ -20,9 +20,10 @@ import anthropic
 from loguru import logger
 
 try:
-    from utils.config import CLAUDE_MODEL
+    from utils.config import CLAUDE_MODEL, settings
 except Exception:
     CLAUDE_MODEL = "claude-sonnet-4-6"
+    settings = None
 
 # Reuse the project-standard JSON extractor — same robustness, no duplication.
 from processing.claude_client import _extract_json
@@ -144,7 +145,7 @@ def get_rules(feature_stats_summary: dict) -> tuple[str, dict]:
     """
     known_features = set(feature_stats_summary.get("feature_stats", {}).keys())
     prompt         = _build_prompt(feature_stats_summary)
-    client         = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+    client         = anthropic.Anthropic(api_key=settings.anthropic_api_key if settings else None)
 
     rules_raw:    str  | None = None
     rules_parsed: dict | None = None
