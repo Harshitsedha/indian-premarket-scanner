@@ -4,18 +4,28 @@ Run: python api/run.py   (port 8001)
 All endpoints use psycopg2 sync — FastAPI runs them in a thread pool.
 """
 
+import json
+import sys
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import psycopg2
 import psycopg2.extras
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+_PIPELINE = Path(__file__).resolve().parents[1]
+if str(_PIPELINE) not in sys.path:
+    sys.path.insert(0, str(_PIPELINE))
 
 from utils.config import settings
 from processing.edge_stats import build_stats, query_rows
+from backtest.features import FEATURES, parse_features
 
 app = FastAPI(title="PreMarket Pro API", version="1.0.0")
 
@@ -23,7 +33,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
     allow_credentials=True,
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -379,3 +389,290 @@ def edge_summary(days: int = Query(default=90, ge=1, le=365)):
     finally:
         conn.close()
     return _safe(stats)
+
+
+# ── Backtest endpoints ────────────────────────────────────────────────────────
+
+_VALID_STRATEGIES = {"gap_and_go"}
+
+
+class CreateJobRequest(BaseModel):
+    mode:        str          # "run" | "record" | "train_test"
+    # run / record fields
+    symbol:      str | None = None    # single-symbol mode
+    multi:       bool        = False  # watchlist mode
+    start:       str         = ""
+    end:         str         = ""
+    strategy:    str         = "gap_and_go"
+    interval:    str         = "minutes/1"
+    ca_jump_pct: float       = 20.0
+    strict_ca:   bool        = False
+    ca_ack:      bool        = True
+    features:    str | None  = None   # required for record; required for train_test
+    # train_test-specific fields
+    train_csv:   str | None  = None   # absolute path to a completed Record CSV
+    test_symbol: str | None  = None   # test scope: single symbol
+    test_multi:  bool        = False  # test scope: full watchlist
+    test_start:  str         = ""
+    test_end:    str         = ""
+
+
+def _validate_job(req: CreateJobRequest) -> dict:
+    """
+    Validate a CreateJobRequest and return the params dict to store in the DB.
+    Raises HTTPException 422 on any validation error.
+    """
+    if req.mode not in ("run", "record", "train_test"):
+        raise HTTPException(422, f"mode must be 'run', 'record', or 'train_test', got {req.mode!r}")
+
+    if req.strategy not in _VALID_STRATEGIES:
+        raise HTTPException(422, f"Unknown strategy {req.strategy!r}")
+
+    # ── train_test validation ─────────────────────────────────────────────────
+    if req.mode == "train_test":
+        if not req.train_csv:
+            raise HTTPException(422, "train_csv is required for train_test mode")
+        from pathlib import Path as _Path
+        if not _Path(req.train_csv).exists():
+            raise HTTPException(422, f"train_csv file not found on server: {req.train_csv}")
+        if not req.features:
+            raise HTTPException(422, "features is required for train_test mode")
+        try:
+            parse_features(req.features)
+        except ValueError as exc:
+            raise HTTPException(422, {"detail": str(exc), "available_features": ", ".join(sorted(FEATURES.keys()))}) from exc
+        if not req.test_symbol and not req.test_multi:
+            raise HTTPException(422, "Provide test_symbol or test_multi=true for train_test mode")
+        if req.test_symbol and req.test_multi:
+            raise HTTPException(422, "Provide test_symbol or test_multi=true, not both")
+        try:
+            date.fromisoformat(req.test_start)
+            date.fromisoformat(req.test_end)
+        except ValueError as exc:
+            raise HTTPException(422, f"Invalid test date: {exc}") from exc
+        if date.fromisoformat(req.test_start) > date.fromisoformat(req.test_end):
+            raise HTTPException(422, "test_start must be ≤ test_end")
+
+        params: dict = {
+            "train_csv":   req.train_csv,
+            "test_start":  req.test_start,
+            "test_end":    req.test_end,
+            "features":    req.features,
+            "strategy":    req.strategy,
+            "interval":    req.interval,
+            "ca_jump_pct": req.ca_jump_pct,
+            "strict_ca":   req.strict_ca,
+            "ca_ack":      req.ca_ack,
+        }
+        if req.test_symbol:
+            params["test_symbol"] = req.test_symbol.upper()
+        else:
+            params["test_multi"] = True
+        return params
+
+    # ── run / record validation ───────────────────────────────────────────────
+    if not req.symbol and not req.multi:
+        raise HTTPException(422, "Provide either symbol (single mode) or multi=true")
+    if req.symbol and req.multi:
+        raise HTTPException(422, "Provide symbol or multi=true, not both")
+
+    if not req.start or not req.end:
+        raise HTTPException(422, "start and end are required for run/record mode")
+
+    try:
+        date.fromisoformat(req.start)
+        date.fromisoformat(req.end)
+    except ValueError as exc:
+        raise HTTPException(422, f"Invalid date: {exc}") from exc
+
+    if date.fromisoformat(req.start) > date.fromisoformat(req.end):
+        raise HTTPException(422, "start must be ≤ end")
+
+    if req.mode == "record":
+        if not req.features:
+            available = ", ".join(sorted(FEATURES.keys()))
+            raise HTTPException(
+                422,
+                f"features is required for record mode. Available: {available}",
+            )
+        try:
+            parse_features(req.features)
+        except ValueError as exc:
+            available = ", ".join(sorted(FEATURES.keys()))
+            raise HTTPException(
+                422,
+                {"detail": str(exc), "available_features": available},
+            ) from exc
+
+    # Build the params dict the worker will pass as **kwargs to run_single/run_multi
+    params = {
+        "start":       req.start,
+        "end":         req.end,
+        "strategy":    req.strategy,
+        "interval":    req.interval,
+        "ca_jump_pct": req.ca_jump_pct,
+        "strict_ca":   req.strict_ca,
+    }
+    if req.symbol:
+        params["symbol"] = req.symbol.upper()
+    else:
+        params["ca_ack"] = req.ca_ack
+
+    if req.mode == "record":
+        params["features"] = req.features
+
+    return params
+
+
+# ── POST /api/backtest/jobs ───────────────────────────────────────────────────
+
+@app.post("/api/backtest/jobs", status_code=201)
+def create_job(req: CreateJobRequest):
+    params = _validate_job(req)
+    conn   = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO backtest_jobs (mode, params)
+                VALUES (%s, %s)
+                RETURNING id, created_at
+                """,
+                (req.mode, json.dumps(params)),
+            )
+            row = cur.fetchone()
+            conn.commit()
+    finally:
+        conn.close()
+    return {"job_id": str(row[0]), "status": "queued", "created_at": row[1].isoformat()}
+
+
+# ── GET /api/backtest/jobs ────────────────────────────────────────────────────
+
+@app.get("/api/backtest/jobs")
+def list_jobs(limit: int = Query(default=50, ge=1, le=200)):
+    conn = _db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, mode, params, status, summary, error,
+                       created_at, started_at, finished_at, result_path
+                  FROM backtest_jobs
+                 ORDER BY created_at DESC
+                 LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+    return _safe(rows)
+
+
+# ── GET /api/backtest/jobs/{id} ───────────────────────────────────────────────
+
+@app.get("/api/backtest/jobs/{job_id}")
+def get_job(job_id: str):
+    conn = _db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, mode, params, status, summary, error,
+                       created_at, started_at, finished_at, result_path
+                  FROM backtest_jobs
+                 WHERE id = %s
+                """,
+                (job_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(404, f"Job {job_id} not found")
+    return _safe(dict(row))
+
+
+# ── GET /api/backtest/jobs/{id}/result ───────────────────────────────────────
+
+@app.get("/api/backtest/jobs/{job_id}/result")
+def download_result(job_id: str):
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, result_path FROM backtest_jobs WHERE id = %s",
+                (job_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(404, f"Job {job_id} not found")
+    status, result_path = row
+    if status != "done" or not result_path:
+        raise HTTPException(404, "Result not available (job not done)")
+    path = Path(result_path)
+    if not path.exists():
+        raise HTTPException(404, f"Result file missing: {path.name}")
+    return FileResponse(
+        path        = str(path),
+        media_type  = "text/csv",
+        filename    = path.name,
+    )
+
+
+# ── GET /api/backtest/features ────────────────────────────────────────────────
+
+@app.get("/api/backtest/features")
+def list_features():
+    """Return the feature registry so the frontend can build the Record form."""
+    return {
+        "features": [
+            {
+                "name":        name,
+                "description": spec.description,
+                "params": [
+                    {
+                        "name":    p.name,
+                        "type":    p.type.__name__,
+                        "default": p.default,
+                    }
+                    for p in spec.params
+                ],
+            }
+            for name, spec in FEATURES.items()
+        ]
+    }
+
+
+# ── GET /api/backtest/rulesets/{job_id} ───────────────────────────────────────
+
+@app.get("/api/backtest/rulesets/{job_id}")
+def get_ruleset(job_id: str):
+    """Return the committed ruleset for a train_test job."""
+    conn = _db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, job_id, train_csv, rules_raw, rules_parsed,
+                       feature_stats, committed_at
+                  FROM backtest_rulesets
+                 WHERE job_id = %s
+                 ORDER BY committed_at DESC
+                 LIMIT 1
+                """,
+                (job_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(404, f"No ruleset found for job {job_id}")
+    return _safe(dict(row))
+
+
+# ── GET /api/backtest/jobs?mode=record&status=done (train dropdown) ───────────
+# Already handled by list_jobs, but frontend filters by query params on the response.

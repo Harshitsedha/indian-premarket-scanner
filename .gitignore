@@ -19,6 +19,10 @@ data/postgres/
 data/redis/
 data/raw_snapshots/
 
+# Backtester generated data — recreatable from API cache
+pipeline/backtest/cache/
+pipeline/backtest/results/
+
 # Next.js
 dashboard/.next/
 dashboard/node_modules/

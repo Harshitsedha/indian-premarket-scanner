@@ -23,10 +23,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             🔔 PreMarket
           </span>
           {[
-            { href: "/",        label: "Today"   },
-            { href: "/news",    label: "News"    },
-            { href: "/history", label: "History" },
-            { href: "/edge",    label: "Edge"    },
+            { href: "/",          label: "Today"    },
+            { href: "/news",      label: "News"     },
+            { href: "/history",   label: "History"  },
+            { href: "/edge",      label: "Edge"     },
+            { href: "/backtest",  label: "Backtest" },
           ].map(({ href, label }) => (
             <Link
               key={href}
