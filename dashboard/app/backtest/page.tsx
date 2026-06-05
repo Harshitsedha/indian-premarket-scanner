@@ -284,6 +284,7 @@ function FeaturePicker({
               type="checkbox"
               checked={selected.has(f.name)}
               onChange={() => onToggle(f.name)}
+              onClick={(e) => e.stopPropagation()}
               style={{ accentColor: "var(--accent)", cursor: "pointer" }}
             />
             <span>
@@ -555,6 +556,7 @@ export default function BacktestPage() {
     }
 
     try {
+      console.log("[backtest] POST body:", JSON.stringify(body, null, 2));
       const res = await fetch(`/api/backtest/jobs`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
