@@ -2,8 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 
-const API = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8001";
-
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type ParamSpec = { name: string; type: string; default: number };
@@ -178,7 +176,7 @@ function JobRow({ job }: { job: Job }) {
   // Fetch ruleset on expand if this is a done train_test job
   useEffect(() => {
     if (expanded && job.mode === "train_test" && job.status === "done" && !ruleset) {
-      fetch(`${API}/api/backtest/rulesets/${job.id}`)
+      fetch(`/api/backtest/rulesets/${job.id}`)
         .then((r) => r.json())
         .then((d) => setRuleset(d))
         .catch(() => {});
@@ -205,7 +203,7 @@ function JobRow({ job }: { job: Job }) {
         <span style={{ color: "var(--muted)", fontSize: 11 }}>{fmtTime(job.created_at)}</span>
         {job.status === "done" && job.result_path ? (
           <a
-            href={`${API}/api/backtest/jobs/${job.id}/result`}
+            href={`/api/backtest/jobs/${job.id}/result`}
             download
             onClick={(e) => e.stopPropagation()}
             style={{
@@ -423,8 +421,18 @@ export default function BacktestPage() {
   const [testStart, setTestStart]           = useState("2026-06-01");
   const [testEnd, setTestEnd]               = useState("2026-06-04");
 
-  // Strategy (only one available)
-  const strategy = "gap_and_go";
+  // Strategy selector
+  const [strategy, setStrategy] = useState("gap_and_go");
+
+  // Advanced / strategy params
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [strategyParams, setStrategyParams] = useState({
+    min_gap_pct:       "1.0",
+    opening_range_min: "15",
+    stop_pct:          "1.0",
+    target_r:          "2.0",
+    entry_window_min:  "60",
+  });
 
   // Submit state
   const [submitting, setSubmitting]   = useState(false);
@@ -436,7 +444,7 @@ export default function BacktestPage() {
 
   // ── Fetch feature registry once ───────────────────────────────────────────
   useEffect(() => {
-    fetch(`${API}/api/backtest/features`)
+    fetch(`/api/backtest/features`)
       .then((r) => r.json())
       .then((d) => setFeatures(d.features ?? []))
       .catch(() => setFeaturesErr("Could not load feature list — is the API running?"));
@@ -445,7 +453,7 @@ export default function BacktestPage() {
   // ── Poll job list every 2s ────────────────────────────────────────────────
   useEffect(() => {
     const poll = () => {
-      fetch(`${API}/api/backtest/jobs?limit=50`)
+      fetch(`/api/backtest/jobs?limit=50`)
         .then((r) => r.json())
         .then((d: Job[]) => {
           setJobs(d);
@@ -528,6 +536,13 @@ export default function BacktestPage() {
         strategy,
         interval: "minutes/1",
         ca_ack: true,
+        strategy_params: {
+          min_gap_pct:       parseFloat(strategyParams.min_gap_pct),
+          opening_range_min: parseInt(strategyParams.opening_range_min, 10),
+          stop_pct:          parseFloat(strategyParams.stop_pct),
+          target_r:          parseFloat(strategyParams.target_r),
+          entry_window_min:  parseInt(strategyParams.entry_window_min, 10),
+        },
       };
       if (scope === "symbol") {
         body.symbol = symbol.trim().toUpperCase();
@@ -540,7 +555,7 @@ export default function BacktestPage() {
     }
 
     try {
-      const res = await fetch(`${API}/api/backtest/jobs`, {
+      const res = await fetch(`/api/backtest/jobs`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify(body),
@@ -550,7 +565,7 @@ export default function BacktestPage() {
         const detail = data.detail ?? JSON.stringify(data);
         setSubmitError(typeof detail === "string" ? detail : JSON.stringify(detail));
       }
-      const updated = await fetch(`${API}/api/backtest/jobs?limit=50`).then((r) => r.json());
+      const updated = await fetch(`/api/backtest/jobs?limit=50`).then((r) => r.json());
       setJobs(updated);
     } catch (err) {
       setSubmitError(String(err));
@@ -630,6 +645,65 @@ export default function BacktestPage() {
               <Field label="End">
                 <input type="date" value={end} onChange={(e) => setEnd(e.target.value)} style={inputStyle} required />
               </Field>
+            </div>
+
+            {/* Strategy selector */}
+            <Field label="Strategy">
+              <select
+                value={strategy}
+                onChange={(e) => setStrategy(e.target.value)}
+                style={inputStyle}
+              >
+                <option value="gap_and_go">Gap and Go</option>
+              </select>
+            </Field>
+
+            {/* Advanced / strategy params */}
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowAdvanced((x) => !x)}
+                style={{
+                  background: "none", border: "none", cursor: "pointer",
+                  color: "var(--muted)", fontSize: 12, padding: 0,
+                  display: "flex", alignItems: "center", gap: 4,
+                }}
+              >
+                <span style={{ fontSize: 10 }}>{showAdvanced ? "▾" : "▸"}</span>
+                Advanced (strategy params)
+              </button>
+
+              {showAdvanced && (
+                <div style={{
+                  marginTop: 10,
+                  display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10,
+                  padding: "12px 14px",
+                  backgroundColor: "var(--bg)", border: "1px solid var(--border)",
+                  borderRadius: 8,
+                }}>
+                  {(
+                    [
+                      { key: "min_gap_pct",       label: "Min gap %",          step: "0.1"  },
+                      { key: "opening_range_min",  label: "Opening range (min)", step: "1"    },
+                      { key: "stop_pct",           label: "Stop %",             step: "0.1"  },
+                      { key: "target_r",           label: "Target R",           step: "0.1"  },
+                      { key: "entry_window_min",   label: "Entry window (bars)", step: "1"    },
+                    ] as Array<{ key: keyof typeof strategyParams; label: string; step: string }>
+                  ).map(({ key, label, step }) => (
+                    <Field key={key} label={label}>
+                      <input
+                        type="number"
+                        step={step}
+                        value={strategyParams[key]}
+                        onChange={(e) =>
+                          setStrategyParams((prev) => ({ ...prev, [key]: e.target.value }))
+                        }
+                        style={{ ...inputStyle, fontFamily: "monospace" }}
+                      />
+                    </Field>
+                  ))}
+                </div>
+              )}
             </div>
           </>
         )}

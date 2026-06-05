@@ -397,24 +397,25 @@ _VALID_STRATEGIES = {"gap_and_go"}
 
 
 class CreateJobRequest(BaseModel):
-    mode:        str          # "run" | "record" | "train_test"
+    mode:            str          # "run" | "record" | "train_test"
     # run / record fields
-    symbol:      str | None = None    # single-symbol mode
-    multi:       bool        = False  # watchlist mode
-    start:       str         = ""
-    end:         str         = ""
-    strategy:    str         = "gap_and_go"
-    interval:    str         = "minutes/1"
-    ca_jump_pct: float       = 20.0
-    strict_ca:   bool        = False
-    ca_ack:      bool        = True
-    features:    str | None  = None   # required for record; required for train_test
+    symbol:          str | None  = None    # single-symbol mode
+    multi:           bool        = False   # watchlist mode
+    start:           str         = ""
+    end:             str         = ""
+    strategy:        str         = "gap_and_go"
+    interval:        str         = "minutes/1"
+    ca_jump_pct:     float       = 20.0
+    strict_ca:       bool        = False
+    ca_ack:          bool        = True
+    features:        str | None  = None    # required for record; required for train_test
+    strategy_params: dict | None = None    # optional GapAndGo constructor overrides
     # train_test-specific fields
-    train_csv:   str | None  = None   # absolute path to a completed Record CSV
-    test_symbol: str | None  = None   # test scope: single symbol
-    test_multi:  bool        = False  # test scope: full watchlist
-    test_start:  str         = ""
-    test_end:    str         = ""
+    train_csv:       str | None  = None    # absolute path to a completed Record CSV
+    test_symbol:     str | None  = None    # test scope: single symbol
+    test_multi:      bool        = False   # test scope: full watchlist
+    test_start:      str         = ""
+    test_end:        str         = ""
 
 
 def _validate_job(req: CreateJobRequest) -> dict:
@@ -468,6 +469,8 @@ def _validate_job(req: CreateJobRequest) -> dict:
             params["test_symbol"] = req.test_symbol.upper()
         else:
             params["test_multi"] = True
+        if req.strategy_params:
+            params["strategy_params"] = req.strategy_params
         return params
 
     # ── run / record validation ───────────────────────────────────────────────
@@ -520,6 +523,9 @@ def _validate_job(req: CreateJobRequest) -> dict:
 
     if req.mode == "record":
         params["features"] = req.features
+
+    if req.strategy_params:
+        params["strategy_params"] = req.strategy_params
 
     return params
 

@@ -354,14 +354,15 @@ def _safe_summary(s: dict) -> dict:
 
 
 def run_single(
-    symbol:      str,
-    start:       str,
-    end:         str,
-    strategy:    str   = "gap_and_go",
-    interval:    str   = "minutes/1",
-    ca_jump_pct: float = 20.0,
-    strict_ca:   bool  = False,
-    features:    str | None = None,
+    symbol:          str,
+    start:           str,
+    end:             str,
+    strategy:        str   = "gap_and_go",
+    interval:        str   = "minutes/1",
+    ca_jump_pct:     float = 20.0,
+    strict_ca:       bool  = False,
+    features:        str | None  = None,
+    strategy_params: dict | None = None,
 ) -> tuple[str, dict]:
     """
     Execute a single-symbol backtest (features=None) or record run (features set).
@@ -398,7 +399,7 @@ def run_single(
             f"{symbol}: {len(ca_events)} CA event(s) detected — aborted (strict_ca)."
         )
 
-    strategy_obj = _STRATEGIES[strategy]()
+    strategy_obj = _STRATEGIES[strategy](**(strategy_params or {}))
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -426,14 +427,15 @@ def run_single(
 
 
 def run_multi(
-    start:       str,
-    end:         str,
-    strategy:    str   = "gap_and_go",
-    interval:    str   = "minutes/1",
-    ca_jump_pct: float = 20.0,
-    strict_ca:   bool  = False,
-    ca_ack:      bool  = True,
-    features:    str | None = None,
+    start:           str,
+    end:             str,
+    strategy:        str   = "gap_and_go",
+    interval:        str   = "minutes/1",
+    ca_jump_pct:     float = 20.0,
+    strict_ca:       bool  = False,
+    ca_ack:          bool  = True,
+    features:        str | None  = None,
+    strategy_params: dict | None = None,
 ) -> tuple[str, dict]:
     """
     Execute a multi-symbol backtest or record run over the full SCAN_WATCHLIST.
@@ -513,7 +515,7 @@ def run_multi(
         if candles.empty:
             continue
         try:
-            strat = strategy_cls()
+            strat = strategy_cls(**(strategy_params or {}))
             if resolved_features is not None:
                 trades, candidates = run_and_record(candles, strat, symbol, resolved_features)
                 all_candidates.extend(candidates)
