@@ -45,11 +45,9 @@ from backtest.engine import run as engine_run, ClosedTrade
 from backtest.record import run_and_record
 from backtest.metrics import compute_summary as compute_trade_summary
 from backtest.recorder import _RESULTS_DIR, write_csv
-from backtest.strategy import GapAndGo
+from backtest.loader import load_strategy
 from backtest.data import get_candles, scan_ca_jumps
 from ingestion.upstox_instruments import get_instrument_token
-
-_STRATEGIES = {"gap_and_go": GapAndGo}
 
 
 def _open_db():
@@ -139,12 +137,13 @@ def run_train_test(
     job_id:       str = "",
     test_symbol:  str | None = None,
     test_multi:   bool = False,
-    strategy:     str  = "gap_and_go",
-    interval:     str  = "minutes/1",
-    ca_jump_pct:  float = 20.0,
-    strict_ca:    bool  = False,
-    ca_ack:       bool  = True,
-    db_conn       = None,      # injected in tests; None → open own connection
+    strategy:        str         = "gap_and_go",
+    interval:        str         = "minutes/1",
+    ca_jump_pct:     float       = 20.0,
+    strict_ca:       bool        = False,
+    ca_ack:          bool        = True,
+    strategy_params: dict | None = None,
+    db_conn          = None,     # injected in tests; None → open own connection
 ) -> tuple[str, dict]:
     """
     Execute a train→test run. Returns (result_path_str, summary_dict).
@@ -155,8 +154,7 @@ def run_train_test(
     if not train_path.exists():
         raise ValueError(f"train_csv not found: {train_csv}")
 
-    if strategy not in _STRATEGIES:
-        raise ValueError(f"Unknown strategy {strategy!r}")
+    strategy_cls = load_strategy(strategy)   # raises ValueError if unknown / unvalidated
 
     resolved_features = parse_features(features)   # ValueError on bad feature name/param
     start_d = date.fromisoformat(test_start)
@@ -168,8 +166,6 @@ def run_train_test(
         raise ValueError("Provide test_symbol or test_multi=True")
     if test_symbol and test_multi:
         raise ValueError("Provide test_symbol or test_multi=True, not both")
-
-    strategy_cls = _STRATEGIES[strategy]
 
     # ── Step A: build summary, call Claude ───────────────────────────────────
     logger.info(f"Step A: building summary from {train_path.name}")
@@ -235,7 +231,7 @@ def run_train_test(
                 logger.info(f"Skipping {symbol}: CA event detected")
                 continue
 
-            strat = strategy_cls()
+            strat = strategy_cls(**(strategy_params or {}))
             try:
                 # run_and_record calls the engine once internally and returns both
                 # the ClosedTrade list and the feature-annotated candidates.

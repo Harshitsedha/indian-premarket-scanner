@@ -34,6 +34,26 @@ type Ruleset = {
   committed_at: string;
 };
 
+type ValidationCheck = { name: string; passed: boolean; detail: string | null };
+type ValidationReport = {
+  passed: boolean;
+  checks: ValidationCheck[];
+  verdict: string;
+  risk_notes: string[];
+};
+
+type StrategyRow = {
+  id: string;
+  name: string;
+  display_name: string;
+  description: string;
+  code?: string;                        // present in /all response; absent in /strategies
+  validated: boolean;
+  validation_report: ValidationReport | null;
+  created_at: string;
+  updated_at: string;
+};
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function fmtTime(iso: string | null): string {
@@ -394,12 +414,373 @@ function ScopeToggle({
   );
 }
 
+// ── Strategy Manager ──────────────────────────────────────────────────────────
+
+type ManagerView = "list" | "describe" | "generating" | "edit" | "validating" | "report";
+
+function toMachineName(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+function isValidMachineName(s: string): boolean {
+  return /^[a-z][a-z0-9_]*$/.test(s);
+}
+
+function StrategyManager({ onStrategyChange }: { onStrategyChange: () => void }) {
+  const [allStrategies, setAllStrategies] = useState<StrategyRow[]>([]);
+  const [refreshKey, setRefreshKey]       = useState(0);
+  const [view, setView]                   = useState<ManagerView>("list");
+  const [isExisting, setIsExisting]       = useState(false);
+
+  // Form fields
+  const [displayName, setDisplayName]           = useState("");
+  const [machineName, setMachineName]           = useState("");
+  const [machineNameTouched, setMachineNameTouched] = useState(false);
+  const [description, setDescription]           = useState("");
+  const [code, setCode]                         = useState("");
+  const [formError, setFormError]               = useState("");
+  const [report, setReport]                     = useState<ValidationReport | null>(null);
+
+  useEffect(() => {
+    fetch("/api/backtest/strategies/all")
+      .then(r => r.json())
+      .then(setAllStrategies)
+      .catch(() => {});
+  }, [refreshKey]);
+
+  function refresh() { setRefreshKey(k => k + 1); }
+
+  function resetForm() {
+    setDisplayName(""); setMachineName(""); setMachineNameTouched(false);
+    setDescription(""); setCode(""); setFormError(""); setReport(null);
+  }
+
+  function startNew() {
+    resetForm(); setIsExisting(false); setView("describe");
+  }
+
+  function startEdit(row: StrategyRow) {
+    setDisplayName(row.display_name);
+    setMachineName(row.name);
+    setMachineNameTouched(true);     // name is locked for existing strategies
+    setDescription(row.description);
+    setCode(row.code ?? "");
+    setFormError(""); setReport(null);
+    setIsExisting(true);
+    setView("edit");                 // skip describe; go straight to editor
+  }
+
+  async function handleGenerate() {
+    if (!description.trim()) { setFormError("Enter a description first."); return; }
+    setView("generating"); setFormError("");
+    try {
+      const res = await fetch("/api/backtest/strategies/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          description,
+          ...(code.trim() ? { existing_code: code } : {}),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? "Generation failed");
+      setCode(data.code);
+      setView("edit");
+    } catch (err) {
+      setFormError(String(err));
+      setView("describe");
+    }
+  }
+
+  async function handleValidate() {
+    if (!isValidMachineName(machineName)) {
+      setFormError("Machine name: lowercase letters/digits/underscores, start with a letter.");
+      return;
+    }
+    if (!displayName.trim()) { setFormError("Display name is required."); return; }
+    if (!code.trim())        { setFormError("Code cannot be empty."); return; }
+    setView("validating"); setFormError("");
+    try {
+      const res = await fetch("/api/backtest/strategies/validate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: machineName, display_name: displayName, description, code }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? "Request failed");
+      setReport(data);
+      setView("report");
+      if (data.passed) { refresh(); onStrategyChange(); }
+    } catch (err) {
+      setFormError(String(err));
+      setView("edit");
+    }
+  }
+
+  async function handleDelete(name: string, dName: string) {
+    if (!confirm(`Delete strategy "${dName}"? This cannot be undone.`)) return;
+    try {
+      const res = await fetch(`/api/backtest/strategies/${name}`, { method: "DELETE" });
+      const data = await res.json();
+      if (!res.ok) { alert(data.detail ?? "Delete failed"); return; }
+      refresh(); onStrategyChange();
+    } catch { alert("Delete failed — check the console."); }
+  }
+
+  // ── Shared styles ─────────────────────────────────────────────────────────
+  const btn = (accent = false): React.CSSProperties => ({
+    padding: "7px 16px", borderRadius: 8, fontSize: 12, cursor: "pointer",
+    border: accent ? "none" : "1px solid var(--border)",
+    backgroundColor: accent ? "var(--accent)" : "transparent",
+    color: accent ? "#fff" : "var(--muted)", fontWeight: accent ? 600 : 400,
+  });
+  const dangerBtn: React.CSSProperties = {
+    padding: "4px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer",
+    border: "1px solid rgba(224,82,82,0.4)", backgroundColor: "transparent",
+    color: "var(--bearish)",
+  };
+
+  const validatedPill = (v: boolean) => (
+    <span style={{
+      fontSize: 10, padding: "2px 7px", borderRadius: 999, fontWeight: 600,
+      textTransform: "uppercase" as const, letterSpacing: "0.05em",
+      backgroundColor: v ? "rgba(29,158,117,0.15)" : "rgba(224,180,82,0.15)",
+      color: v ? "var(--bullish)" : "rgb(200,155,60)",
+    }}>
+      {v ? "Validated" : "Draft"}
+    </span>
+  );
+
+  // ── Loading states ────────────────────────────────────────────────────────
+  if (view === "generating" || view === "validating") {
+    return (
+      <div style={{ padding: "20px 0", color: "var(--muted)", fontSize: 13, display: "flex", alignItems: "center", gap: 10 }}>
+        <style>{`@keyframes stratSpin{to{transform:rotate(360deg)}}`}</style>
+        <span style={{ display: "inline-block", width: 14, height: 14, border: "2px solid var(--accent)", borderTopColor: "transparent", borderRadius: "50%", animation: "stratSpin 0.8s linear infinite" }} />
+        {view === "generating" ? "Claude is writing your strategy…" : "Claude is validating your strategy…"}
+      </div>
+    );
+  }
+
+  // ── Validation report (Step 3) ────────────────────────────────────────────
+  if (view === "report" && report) {
+    const checkLabel: Record<string, string> = {
+      no_look_ahead:          "No look-ahead",
+      no_future_imports:      "No future imports",
+      protocol_compliance:    "Protocol compliance",
+      reset_day_clears_state: "reset_day clears state",
+      on_bar_no_side_effects: "on_bar no side effects",
+    };
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <p style={{ fontWeight: 600, fontSize: 13, margin: 0 }}>Validation Report</p>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {report.checks.map(c => (
+            <div key={c.name} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12 }}>
+              <span style={{ color: c.passed ? "var(--bullish)" : "var(--bearish)", fontWeight: 700, minWidth: 14 }}>
+                {c.passed ? "✓" : "✗"}
+              </span>
+              <span style={{ color: c.passed ? "var(--text)" : "var(--bearish)", fontWeight: 600, minWidth: 180 }}>
+                {checkLabel[c.name] ?? c.name}
+              </span>
+              {c.detail && (
+                <span style={{ color: "var(--muted)", fontFamily: "monospace" }}>{c.detail}</span>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {report.risk_notes.length > 0 && (
+          <div style={{ fontSize: 11, color: "var(--muted)", fontStyle: "italic" }}>
+            Notes: {report.risk_notes.join(" · ")}
+          </div>
+        )}
+
+        <p style={{
+          margin: 0, fontSize: 12, padding: "8px 12px", borderRadius: 8,
+          backgroundColor: report.passed ? "rgba(29,158,117,0.10)" : "rgba(224,82,82,0.10)",
+          color: report.passed ? "var(--bullish)" : "var(--bearish)",
+        }}>
+          {report.passed
+            ? `✓ ${report.verdict} Strategy "${displayName}" is now registered and appears in the dropdown.`
+            : `✗ ${report.verdict} Fix the issues above and revalidate.`}
+        </p>
+
+        {report.passed
+          ? <button type="button" style={btn()} onClick={() => { setView("list"); resetForm(); }}>Done</button>
+          : <button type="button" style={btn(true)} onClick={() => setView("edit")}>Edit Code</button>
+        }
+      </div>
+    );
+  }
+
+  // ── Code editor (Step 2) ──────────────────────────────────────────────────
+  if (view === "edit") {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <span style={{ fontWeight: 600, fontSize: 13 }}>{displayName || "New Strategy"}</span>
+          <span style={{ fontSize: 11, fontFamily: "monospace", color: "var(--muted)" }}>{machineName}</span>
+        </div>
+
+        <textarea
+          value={code}
+          onChange={e => setCode(e.target.value)}
+          spellCheck={false}
+          style={{
+            width: "100%", minHeight: 340, padding: "10px 12px",
+            fontFamily: "monospace", fontSize: 12, lineHeight: 1.55,
+            backgroundColor: "var(--bg)", border: "1px solid var(--border)",
+            borderRadius: 8, color: "var(--text)", resize: "vertical",
+            boxSizing: "border-box",
+          }}
+          placeholder="class MyStrategy:&#10;    ..."
+        />
+
+        {formError && (
+          <p style={{ color: "var(--bearish)", fontSize: 12, margin: 0 }}>{formError}</p>
+        )}
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <button type="button" style={btn()} onClick={() => setView(isExisting ? "list" : "describe")}>
+            ← Back
+          </button>
+          <button type="button" style={btn(true)} onClick={handleValidate}>
+            Validate &amp; Save
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Describe form (Step 1) ────────────────────────────────────────────────
+  if (view === "describe") {
+    const nameOk = !machineName || isValidMachineName(machineName);
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ fontSize: 11, color: "var(--muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              Display name
+            </label>
+            <input
+              value={displayName}
+              onChange={e => {
+                setDisplayName(e.target.value);
+                if (!machineNameTouched) setMachineName(toMachineName(e.target.value));
+              }}
+              placeholder="e.g. EMA Crossover"
+              style={inputStyle}
+            />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ fontSize: 11, color: "var(--muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              Machine name{isExisting ? " (locked)" : " (auto-derived, editable)"}
+            </label>
+            <input
+              value={machineName}
+              onChange={e => { setMachineName(e.target.value); setMachineNameTouched(true); }}
+              placeholder="ema_crossover"
+              disabled={isExisting}
+              style={{
+                ...inputStyle,
+                fontFamily: "monospace",
+                borderColor: nameOk ? undefined : "var(--bearish)",
+                opacity: isExisting ? 0.6 : 1,
+              }}
+            />
+            {!nameOk && (
+              <span style={{ fontSize: 10, color: "var(--bearish)" }}>
+                Lowercase letters/digits/underscores, start with a letter
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <label style={{ fontSize: 11, color: "var(--muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+            Describe your strategy in plain English
+          </label>
+          <textarea
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            placeholder="e.g. Buy when the 9-period EMA crosses above the 21-period EMA on the first occurrence of the day…"
+            style={{
+              ...inputStyle, minHeight: 90, resize: "vertical",
+              fontFamily: "inherit", lineHeight: 1.5,
+            }}
+          />
+        </div>
+
+        {formError && (
+          <p style={{ color: "var(--bearish)", fontSize: 12, margin: 0 }}>{formError}</p>
+        )}
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <button type="button" style={btn()} onClick={() => setView("list")}>← List</button>
+          <button type="button" style={btn(true)} onClick={handleGenerate}>
+            {code.trim() ? "Regenerate Code" : "Generate Code"}
+          </button>
+          {code.trim() && (
+            <button type="button" style={btn()} onClick={() => setView("edit")}>
+              Skip to Editor →
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Strategy list ─────────────────────────────────────────────────────────
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <button type="button" style={btn(true)} onClick={startNew}>+ New Strategy</button>
+      </div>
+
+      {allStrategies.length === 0 ? (
+        <p style={{ color: "var(--muted)", fontSize: 13 }}>No strategies yet.</p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+          {allStrategies.map(row => (
+            <div key={row.name} style={{
+              display: "grid", gridTemplateColumns: "140px auto 1fr auto",
+              gap: 10, alignItems: "center", padding: "9px 12px",
+              borderBottom: "1px solid var(--border)",
+            }}>
+              <span style={{ fontWeight: 600, fontSize: 13 }}>{row.display_name}</span>
+              {validatedPill(row.validated)}
+              <span style={{ color: "var(--muted)", fontSize: 12 }}>{row.description}</span>
+              <div style={{ display: "flex", gap: 6 }}>
+                {row.name !== "gap_and_go" && (
+                  <>
+                    <button type="button" style={btn()} onClick={() => startEdit(row)}>Edit</button>
+                    <button type="button" style={dangerBtn} onClick={() => handleDelete(row.name, row.display_name)}>Delete</button>
+                  </>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function BacktestPage() {
   // Feature registry
   const [features, setFeatures]       = useState<FeatureSpec[]>([]);
   const [featuresErr, setFeaturesErr] = useState("");
+
+  // Validated strategies (for job form dropdown)
+  const [validatedStrategies, setValidatedStrategies] = useState<StrategyRow[]>([]);
+  const [stratRefreshKey, setStratRefreshKey]         = useState(0);
+
+  // Strategy Manager panel visibility
+  const [showManager, setShowManager] = useState(false);
 
   // Mode toggle
   const [mode, setMode] = useState<"run" | "record" | "train_test">("run");
@@ -450,6 +831,14 @@ export default function BacktestPage() {
       .then((d) => setFeatures(d.features ?? []))
       .catch(() => setFeaturesErr("Could not load feature list — is the API running?"));
   }, []);
+
+  // ── Fetch validated strategies for the dropdown ───────────────────────────
+  useEffect(() => {
+    fetch("/api/backtest/strategies")
+      .then(r => r.json())
+      .then((list: StrategyRow[]) => setValidatedStrategies(list))
+      .catch(() => {});
+  }, [stratRefreshKey]);
 
   // ── Poll job list every 2s ────────────────────────────────────────────────
   useEffect(() => {
@@ -601,6 +990,33 @@ export default function BacktestPage() {
         )}
       </div>
 
+      {/* ── Strategy Manager ── */}
+      <div style={{
+        backgroundColor: "var(--surface)", border: "1px solid var(--border)",
+        borderRadius: 12, overflow: "hidden",
+      }}>
+        <button
+          type="button"
+          onClick={() => setShowManager(x => !x)}
+          style={{
+            width: "100%", display: "flex", alignItems: "center", gap: 8,
+            padding: "12px 16px", border: "none", background: "transparent",
+            cursor: "pointer", color: "var(--text)", fontSize: 13, fontWeight: 500,
+          }}
+        >
+          <span style={{ fontSize: 10, color: "var(--muted)" }}>{showManager ? "▾" : "▸"}</span>
+          Strategy Manager
+          <span style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400, marginLeft: 4 }}>
+            — generate, validate, and register new strategies without redeploying
+          </span>
+        </button>
+        {showManager && (
+          <div style={{ padding: "0 16px 16px", borderTop: "1px solid var(--border)" }}>
+            <StrategyManager onStrategyChange={() => setStratRefreshKey(k => k + 1)} />
+          </div>
+        )}
+      </div>
+
       {/* ── Form ── */}
       <form
         onSubmit={handleSubmit}
@@ -649,14 +1065,19 @@ export default function BacktestPage() {
               </Field>
             </div>
 
-            {/* Strategy selector */}
+            {/* Strategy selector — populated from validated strategies in DB */}
             <Field label="Strategy">
               <select
                 value={strategy}
                 onChange={(e) => setStrategy(e.target.value)}
                 style={inputStyle}
               >
-                <option value="gap_and_go">Gap and Go</option>
+                {validatedStrategies.length > 0
+                  ? validatedStrategies.map(s => (
+                      <option key={s.name} value={s.name}>{s.display_name}</option>
+                    ))
+                  : <option value="gap_and_go">Gap and Go</option>
+                }
               </select>
             </Field>
 

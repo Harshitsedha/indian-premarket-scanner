@@ -49,12 +49,8 @@ from backtest.features import parse_features
 from backtest.metrics import compute_summary, print_summary, write_summary
 from backtest.record import run_and_record, write_candidates
 from backtest.recorder import _RESULTS_DIR, write_csv
-from backtest.strategy import GapAndGo
+from backtest.loader import load_strategy
 from ingestion.upstox_instruments import get_instrument_token
-
-_STRATEGIES = {
-    "gap_and_go": GapAndGo,
-}
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -75,7 +71,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--end",      required=True,       help="YYYY-MM-DD")
     p.add_argument("--interval", default="minutes/1", help="e.g. minutes/1 (default)")
     p.add_argument("--strategy", default="gap_and_go",
-                   choices=list(_STRATEGIES.keys()),  help="Strategy name")
+                   help="Strategy name (must be registered and validated in the DB)")
 
     # Single-symbol only
     p.add_argument("--out", default=None, help="Override output CSV path (single mode)")
@@ -144,7 +140,7 @@ def _run_single(args: argparse.Namespace) -> None:
         )
         sys.exit(2)
 
-    strategy_cls      = _STRATEGIES[args.strategy]
+    strategy_cls      = load_strategy(args.strategy)
     strategy          = strategy_cls()
     resolved_features = _resolve_features(args)
     logger.info(f"Strategy: {args.strategy}")
@@ -196,7 +192,7 @@ def _run_multi(args: argparse.Namespace) -> None:
     start        = date.fromisoformat(args.start)
     end          = date.fromisoformat(args.end)
     interval     = args.interval
-    strategy_cls = _STRATEGIES[args.strategy]
+    strategy_cls = load_strategy(args.strategy)
     n_sym        = len(SCAN_WATCHLIST)
 
     _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -375,8 +371,7 @@ def run_single(
     """
     symbol = symbol.upper()
 
-    if strategy not in _STRATEGIES:
-        raise ValueError(f"Unknown strategy {strategy!r}. Available: {list(_STRATEGIES)}")
+    strategy_cls = load_strategy(strategy)   # raises ValueError if unknown / unvalidated
 
     resolved_features = None
     if features is not None:
@@ -399,7 +394,7 @@ def run_single(
             f"{symbol}: {len(ca_events)} CA event(s) detected — aborted (strict_ca)."
         )
 
-    strategy_obj = _STRATEGIES[strategy](**(strategy_params or {}))
+    strategy_obj = strategy_cls(**(strategy_params or {}))
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -448,17 +443,15 @@ def run_multi(
     """
     from processing.ranker import SCAN_WATCHLIST
 
-    if strategy not in _STRATEGIES:
-        raise ValueError(f"Unknown strategy {strategy!r}. Available: {list(_STRATEGIES)}")
+    strategy_cls = load_strategy(strategy)   # raises ValueError if unknown / unvalidated
 
     resolved_features = None
     if features is not None:
         resolved_features = parse_features(features)
 
-    start_d      = date.fromisoformat(start)
-    end_d        = date.fromisoformat(end)
-    strategy_cls = _STRATEGIES[strategy]
-    run_ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
+    start_d = date.fromisoformat(start)
+    end_d   = date.fromisoformat(end)
+    run_ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -515,7 +508,7 @@ def run_multi(
         if candles.empty:
             continue
         try:
-            strat = strategy_cls(**(strategy_params or {}))
+            strat = strategy_cls(**(strategy_params or {}))   # fresh instance per symbol
             if resolved_features is not None:
                 trades, candidates = run_and_record(candles, strat, symbol, resolved_features)
                 all_candidates.extend(candidates)

@@ -33,7 +33,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -393,7 +393,22 @@ def edge_summary(days: int = Query(default=90, ge=1, le=365)):
 
 # ── Backtest endpoints ────────────────────────────────────────────────────────
 
-_VALID_STRATEGIES = {"gap_and_go"}
+
+def _strategy_exists_and_validated(name: str) -> bool:
+    """Return True iff name is in backtest_strategies with validated=true."""
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1 FROM backtest_strategies
+                 WHERE name = %s AND validated = true AND deleted_at IS NULL
+                """,
+                (name,),
+            )
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
 
 
 class CreateJobRequest(BaseModel):
@@ -426,8 +441,8 @@ def _validate_job(req: CreateJobRequest) -> dict:
     if req.mode not in ("run", "record", "train_test"):
         raise HTTPException(422, f"mode must be 'run', 'record', or 'train_test', got {req.mode!r}")
 
-    if req.strategy not in _VALID_STRATEGIES:
-        raise HTTPException(422, f"Unknown strategy {req.strategy!r}")
+    if not _strategy_exists_and_validated(req.strategy):
+        raise HTTPException(422, f"Unknown or unvalidated strategy {req.strategy!r}")
 
     # ── train_test validation ─────────────────────────────────────────────────
     if req.mode == "train_test":
@@ -680,5 +695,161 @@ def get_ruleset(job_id: str):
     return _safe(dict(row))
 
 
-# ── GET /api/backtest/jobs?mode=record&status=done (train dropdown) ───────────
-# Already handled by list_jobs, but frontend filters by query params on the response.
+# ── Strategy Manager endpoints ────────────────────────────────────────────────
+
+import re as _re
+
+
+class _GenerateRequest(BaseModel):
+    description:   str
+    existing_code: str | None = None
+
+
+class _ValidateRequest(BaseModel):
+    name:         str    # machine name: lowercase alphanum + underscores
+    display_name: str
+    description:  str
+    code:         str
+
+
+@app.post("/api/backtest/strategies/generate")
+def generate_strategy_endpoint(req: _GenerateRequest):
+    """Call Claude to generate a strategy class. Returns {code: str}."""
+    if not req.description.strip():
+        raise HTTPException(422, "description must not be empty")
+    from backtest.strategy_gen import generate_strategy
+    try:
+        code = generate_strategy(req.description, req.existing_code)
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"code": code}
+
+
+@app.post("/api/backtest/strategies/validate")
+def validate_strategy_endpoint(req: _ValidateRequest):
+    """
+    Call Claude to validate the strategy code, then persist to DB.
+    Returns the full ValidationReport regardless of pass/fail.
+    If passed=true, the strategy is marked validated and appears in the dropdown.
+    """
+    if not _re.match(r'^[a-z][a-z0-9_]*$', req.name):
+        raise HTTPException(
+            422,
+            "name must be lowercase letters/digits/underscores, starting with a letter",
+        )
+    if req.name == "gap_and_go":
+        raise HTTPException(403, "gap_and_go is the immutable baseline and cannot be modified")
+    if not req.display_name.strip():
+        raise HTTPException(422, "display_name must not be empty")
+    if not req.code.strip():
+        raise HTTPException(422, "code must not be empty")
+
+    from backtest.strategy_val import validate_strategy
+    try:
+        report = validate_strategy(req.code)
+    except ValueError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO backtest_strategies
+                    (name, display_name, description, code, validated, validation_report)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (name) DO UPDATE SET
+                    display_name      = EXCLUDED.display_name,
+                    description       = EXCLUDED.description,
+                    code              = EXCLUDED.code,
+                    validated         = EXCLUDED.validated,
+                    validation_report = EXCLUDED.validation_report,
+                    updated_at        = NOW(),
+                    deleted_at        = NULL
+                """,
+                (
+                    req.name, req.display_name, req.description,
+                    req.code, report["passed"], json.dumps(report),
+                ),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+    # Evict cache so next load_strategy call picks up fresh code
+    from backtest.loader import _CACHE
+    _CACHE.clear()
+
+    return report
+
+
+@app.get("/api/backtest/strategies")
+def list_validated_strategies():
+    """Return validated strategies (for the job form dropdown). No code field."""
+    conn = _db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, name, display_name, description,
+                       validated, created_at, updated_at
+                  FROM backtest_strategies
+                 WHERE validated = true AND deleted_at IS NULL
+                 ORDER BY name
+                """
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+    return _safe(rows)
+
+
+@app.get("/api/backtest/strategies/all")
+def list_all_strategies():
+    """Return all strategies including drafts (for Strategy Manager UI). Includes code."""
+    conn = _db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, name, display_name, description, code,
+                       validated, validation_report, created_at, updated_at
+                  FROM backtest_strategies
+                 WHERE deleted_at IS NULL
+                 ORDER BY name
+                """
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+    return _safe(rows)
+
+
+@app.delete("/api/backtest/strategies/{name}")
+def delete_strategy(name: str):
+    """Soft-delete a strategy (sets deleted_at). gap_and_go is immutable — returns 403."""
+    if name == "gap_and_go":
+        raise HTTPException(403, "gap_and_go is the immutable baseline and cannot be deleted")
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE backtest_strategies
+                   SET deleted_at = NOW()
+                 WHERE name = %s AND deleted_at IS NULL
+                """,
+                (name,),
+            )
+            if cur.rowcount == 0:
+                conn.rollback()
+                raise HTTPException(404, f"Strategy {name!r} not found")
+            conn.commit()
+    finally:
+        conn.close()
+
+    # Evict cache
+    from backtest.loader import _CACHE
+    _CACHE.clear()
+
+    return {"deleted": name}
