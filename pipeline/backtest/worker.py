@@ -9,12 +9,13 @@ Guarantees:
     but one is enough given typical job durations (seconds to minutes on cache).
   - A crash inside a job sets status=error with full traceback; the loop continues.
   - DB errors in the poll loop are logged and retried after the poll interval.
-  - On startup, jobs stuck in 'running' for >10 min are re-queued automatically.
+  - On startup, jobs stuck in 'running' for >10 min are marked error (not re-queued).
 """
 from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
 import time
 import traceback
@@ -32,6 +33,17 @@ from utils.config import settings
 from utils.logger import setup_logger
 from backtest.run import run_single, run_multi
 
+# Hard limit per job. SIGALRM is UNIX-only; this worker runs on a Linux VPS.
+_MAX_JOB_SECONDS = 600   # 10 minutes
+
+
+class _JobTimeout(Exception):
+    pass
+
+
+def _alarm_handler(signum, frame):
+    raise _JobTimeout(f"Job exceeded {_MAX_JOB_SECONDS // 60}-minute hard limit")
+
 
 def _db():
     return psycopg2.connect(
@@ -44,19 +56,28 @@ def _db():
 
 
 def _reset_orphaned(conn) -> None:
-    """Re-queue any jobs stuck in 'running' from a previous crashed worker."""
+    """
+    Mark jobs still in 'running' when the worker restarts as error.
+
+    Re-queuing would cause an infinite cycle when combined with systemd
+    Restart=on-failure: crash → restart → re-queue → crash → ...
+    Marking as error breaks the cycle; the user can resubmit manually.
+    """
     with conn.cursor() as cur:
         cur.execute("""
             UPDATE backtest_jobs
-               SET status = 'queued',
-                   started_at = NULL
+               SET status     = 'error',
+                   finished_at = NOW(),
+                   error       = 'Job was still running when the worker restarted '
+                                 '(likely timed out or the worker process was killed). '
+                                 'Resubmit to retry.'
              WHERE status = 'running'
                AND started_at < NOW() - INTERVAL '10 minutes'
         """)
         count = cur.rowcount
         conn.commit()
     if count:
-        logger.warning(f"Re-queued {count} orphaned running job(s) from previous worker.")
+        logger.warning(f"Marked {count} orphaned running job(s) as error (not re-queued).")
 
 
 def _claim(conn) -> dict | None:
@@ -152,11 +173,20 @@ def main() -> None:
                 if job:
                     jid = str(job["id"])
                     logger.info(f"[{jid[:8]}] Claimed {job['mode']} job, params={job['params']}")
+                    signal.signal(signal.SIGALRM, _alarm_handler)
+                    signal.alarm(_MAX_JOB_SECONDS)
                     try:
                         result_path, summary = _execute(job)
+                        signal.alarm(0)
                         _set_done(conn, jid, result_path, summary)
-                        logger.info(f"[{jid[:8]}] Done → {result_path}")
+                        logger.info(f"[{jid[:8]}] Done -> {result_path}")
+                    except _JobTimeout as exc:
+                        signal.alarm(0)
+                        msg = str(exc)
+                        logger.error(f"[{jid[:8]}] TIMEOUT: {msg}")
+                        _set_error(conn, jid, f"TIMEOUT: {msg}")
                     except Exception:
+                        signal.alarm(0)
                         tb = traceback.format_exc()
                         logger.error(f"[{jid[:8]}] Failed:\n{tb}")
                         _set_error(conn, jid, tb)

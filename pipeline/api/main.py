@@ -469,6 +469,8 @@ def _validate_job(req: CreateJobRequest) -> dict:
             raise HTTPException(422, f"Invalid test date: {exc}") from exc
         if date.fromisoformat(req.test_start) > date.fromisoformat(req.test_end):
             raise HTTPException(422, "test_start must be ≤ test_end")
+        if req.test_symbol and req.test_symbol.upper() not in TAGGING_UNIVERSE_SET:
+            raise HTTPException(400, f"Unknown symbol '{req.test_symbol.upper()}' — not in the backtest universe. Select from the autocomplete list.")
 
         params: dict = {
             "train_csv":   req.train_csv,
@@ -506,6 +508,8 @@ def _validate_job(req: CreateJobRequest) -> dict:
 
     if date.fromisoformat(req.start) > date.fromisoformat(req.end):
         raise HTTPException(422, "start must be ≤ end")
+    if req.symbol and req.symbol.upper() not in TAGGING_UNIVERSE_SET:
+        raise HTTPException(400, f"Unknown symbol '{req.symbol.upper()}' — not in the backtest universe. Select from the autocomplete list.")
 
     if req.mode == "record":
         if not req.features:

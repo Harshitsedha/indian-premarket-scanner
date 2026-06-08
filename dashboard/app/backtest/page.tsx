@@ -1053,6 +1053,11 @@ export default function BacktestPage() {
     entry_window_min:  "60",
   });
 
+  // Symbol universe (for submit-time validation; autocomplete list is fetched inside ScopeToggle)
+  const [symbolList, setSymbolList]       = useState<string[]>([]);
+  const [symbolError, setSymbolError]     = useState("");
+  const [testSymbolError, setTestSymbolError] = useState("");
+
   // Submit state
   const [submitting, setSubmitting]   = useState(false);
   const [submitError, setSubmitError] = useState("");
@@ -1067,6 +1072,14 @@ export default function BacktestPage() {
       .then((r) => r.json())
       .then((d) => setFeatures(d.features ?? []))
       .catch(() => setFeaturesErr("Could not load feature list — is the API running?"));
+  }, []);
+
+  // ── Fetch symbol universe for submit-time validation ──────────────────────
+  useEffect(() => {
+    fetch("/api/backtest/symbols")
+      .then((r) => r.json())
+      .then((d: Array<{ symbol: string }>) => setSymbolList(d.map((x) => x.symbol)))
+      .catch(() => {});
   }, []);
 
   // ── Fetch validated strategies for the dropdown ───────────────────────────
@@ -1124,6 +1137,8 @@ export default function BacktestPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setSubmitError("");
+    setSymbolError("");
+    setTestSymbolError("");
 
     if ((mode === "record" || mode === "train_test") && selectedFeatures.size === 0) {
       setSubmitError("Select at least one feature.");
@@ -1132,6 +1147,22 @@ export default function BacktestPage() {
     if (mode === "train_test" && !selectedTrainJob) {
       setSubmitError("Select a completed Record job as the training set.");
       return;
+    }
+
+    // Symbol universe validation (only when list has loaded; free text allowed if list not yet loaded)
+    if (symbolList.length > 0) {
+      if ((mode === "run" || mode === "record") && scope === "symbol") {
+        if (!symbolList.includes(symbol.trim().toUpperCase())) {
+          setSymbolError("Unknown symbol — select from the autocomplete list.");
+          return;
+        }
+      }
+      if (mode === "train_test" && testScope === "symbol") {
+        if (!symbolList.includes(testSymbol.trim().toUpperCase())) {
+          setTestSymbolError("Unknown symbol — select from the autocomplete list.");
+          return;
+        }
+      }
     }
 
     setSubmitting(true);
@@ -1290,9 +1321,12 @@ export default function BacktestPage() {
           <>
             <ScopeToggle
               scope={scope} symbol={symbol}
-              setScope={setScope} setSymbol={setSymbol}
+              setScope={setScope} setSymbol={(s) => { setSymbol(s); setSymbolError(""); }}
               symbolKey="backtest"
             />
+            {symbolError && scope === "symbol" && (
+              <p style={{ color: "var(--bearish)", fontSize: 12, margin: "-8px 0 0" }}>{symbolError}</p>
+            )}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
               <Field label="Start">
                 <input type="date" value={start} onChange={(e) => setStart(e.target.value)} style={inputStyle} required />
@@ -1406,9 +1440,12 @@ export default function BacktestPage() {
             <Field label="Test scope">
               <ScopeToggle
                 scope={testScope} symbol={testSymbol}
-                setScope={setTestScope} setSymbol={setTestSymbol}
+                setScope={setTestScope} setSymbol={(s) => { setTestSymbol(s); setTestSymbolError(""); }}
                 symbolKey="test"
               />
+              {testSymbolError && testScope === "symbol" && (
+                <p style={{ color: "var(--bearish)", fontSize: 12, margin: "4px 0 0" }}>{testSymbolError}</p>
+              )}
             </Field>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
