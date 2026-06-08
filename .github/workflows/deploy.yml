@@ -59,11 +59,14 @@ jobs:
             # Reinstall Python deps and restart services when pipeline/ changed, or on forced rebuild.
             if [ "$REBUILD_ALL" = true ] || echo "$CHANGED" | grep -qE "^pipeline/"; then
               echo "=== Pipeline: reinstalling deps and restarting services ==="
+              # Clear stale bytecode so no __pycache__ from pre-deploy code survives.
+              find /opt/premarket/pipeline -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
               source pipeline/.venv/bin/activate
               pip install -e pipeline/ --quiet
               sudo systemctl restart premarket-api
               sudo systemctl restart premarket-scheduler
-              echo "premarket-api + premarket-scheduler restarted"
+              sudo systemctl restart backtest-worker
+              echo "premarket-api + premarket-scheduler + backtest-worker restarted"
             fi
 
             echo "Deploy complete $(date)"

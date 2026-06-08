@@ -381,6 +381,46 @@ function ScopeToggle({
   setSymbol: (s: string) => void;
   symbolKey: string;
 }) {
+  const [symbolList, setSymbolList]     = useState<string[]>([]);
+  const [filtered, setFiltered]         = useState<string[]>([]);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [activeIdx, setActiveIdx]       = useState(-1);
+  const debounceRef = useRef(0);
+  const wrapperRef  = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    fetch("/api/backtest/symbols")
+      .then(r => r.json())
+      .then((data: Array<{ symbol: string }>) => setSymbolList(data.map(d => d.symbol)))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    function onMouseDown(e: MouseEvent) {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+        setShowDropdown(false);
+      }
+    }
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, []);
+
+  function filterSymbols(val: string) {
+    if (!val) { setFiltered([]); setShowDropdown(false); return; }
+    const q = val.toUpperCase();
+    const matches = symbolList.filter(s => s.includes(q)).slice(0, 8);
+    setFiltered(matches);
+    setShowDropdown(matches.length > 0);
+    setActiveIdx(-1);
+  }
+
+  function handleSelect(s: string) {
+    setSymbol(s);
+    setShowDropdown(false);
+    setFiltered([]);
+    setActiveIdx(-1);
+  }
+
   return (
     <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 12, alignItems: "center" }}>
       <div style={{ display: "flex", gap: 0, borderRadius: 8, overflow: "hidden", border: "1px solid var(--border)" }}>
@@ -400,13 +440,64 @@ function ScopeToggle({
         ))}
       </div>
       {scope === "symbol" ? (
-        <input
-          value={symbol}
-          onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-          placeholder={`NSE ticker for ${symbolKey}`}
-          style={{ ...inputStyle, fontFamily: "monospace" }}
-          required
-        />
+        <div ref={wrapperRef} style={{ position: "relative" }}>
+          <input
+            value={symbol}
+            onChange={(e) => {
+              const val = e.target.value.toUpperCase();
+              setSymbol(val);
+              clearTimeout(debounceRef.current);
+              debounceRef.current = window.setTimeout(() => filterSymbols(val), 150);
+            }}
+            onKeyDown={(e) => {
+              if (!showDropdown || filtered.length === 0) return;
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setActiveIdx(i => Math.min(i + 1, filtered.length - 1));
+              } else if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setActiveIdx(i => Math.max(i - 1, -1));
+              } else if (e.key === "Enter" && activeIdx >= 0) {
+                e.preventDefault();
+                handleSelect(filtered[activeIdx]);
+              } else if (e.key === "Escape") {
+                setShowDropdown(false);
+                setActiveIdx(-1);
+              }
+            }}
+            onFocus={() => { if (filtered.length > 0) setShowDropdown(true); }}
+            placeholder={`NSE ticker for ${symbolKey}`}
+            style={{ ...inputStyle, fontFamily: "monospace", width: "100%", boxSizing: "border-box" }}
+            required
+            autoComplete="off"
+          />
+          {showDropdown && (
+            <ul style={{
+              position: "absolute", top: "100%", left: 0, right: 0,
+              margin: 0, padding: 4, listStyle: "none",
+              backgroundColor: "var(--surface)", border: "1px solid var(--border)",
+              borderRadius: 8, zIndex: 100, marginTop: 2,
+              boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+              maxHeight: 240, overflowY: "auto",
+            }}>
+              {filtered.map((s, i) => (
+                <li
+                  key={s}
+                  onMouseDown={() => handleSelect(s)}
+                  onMouseEnter={() => setActiveIdx(i)}
+                  style={{
+                    padding: "6px 10px", fontSize: 13, cursor: "pointer",
+                    fontFamily: "monospace", borderRadius: 6,
+                    backgroundColor: i === activeIdx ? "rgba(124,111,224,0.25)" : "transparent",
+                    color: "var(--text)",
+                  }}
+                >
+                  {s}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       ) : (
         <span style={{ fontSize: 12, color: "var(--muted)" }}>50 symbols · SCAN_WATCHLIST</span>
       )}

@@ -25,6 +25,7 @@ if str(_PIPELINE) not in sys.path:
 
 from utils.config import settings
 from processing.edge_stats import build_stats, query_rows
+from processing.tagging_universe import TAGGING_UNIVERSE_SET
 from backtest.features import FEATURES, parse_features
 
 app = FastAPI(title="PreMarket Pro API", version="1.0.0")
@@ -642,6 +643,14 @@ def download_result(job_id: str):
         media_type  = "text/csv",
         filename    = path.name,
     )
+
+
+# ── GET /api/backtest/symbols ─────────────────────────────────────────────────
+
+@app.get("/api/backtest/symbols")
+def list_symbols():
+    """Return the ~200-symbol tagging universe for backtest instrument autocomplete."""
+    return [{"symbol": s} for s in sorted(TAGGING_UNIVERSE_SET)]
 
 
 # ── GET /api/backtest/features ────────────────────────────────────────────────
