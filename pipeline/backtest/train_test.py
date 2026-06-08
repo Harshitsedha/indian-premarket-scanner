@@ -241,7 +241,7 @@ def run_train_test(
                 continue
 
             # Build a date→trade index for O(1) lookup
-            trade_by_date = {t.date: t for t in trades}
+            trade_by_date = {t.entry_date: t for t in trades}
             all_trades.extend(trades)
 
             for cand in candidates:

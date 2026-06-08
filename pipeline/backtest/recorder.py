@@ -2,7 +2,8 @@
 Trade recorder: accumulate ClosedTrade objects and write a CSV.
 
 Output columns (matches user spec exactly):
-    symbol, date, entry_time, entry_price, exit_time, exit_price,
+    symbol, entry_date, entry_time, entry_price,
+    exit_date, exit_time, exit_price,
     side, gap_pct, bars_held, pnl_abs, pnl_pct, mfe_pct, mae_pct, exit_reason
 """
 from __future__ import annotations
@@ -19,8 +20,8 @@ from backtest.engine import ClosedTrade
 _RESULTS_DIR = Path(__file__).parent / "results"
 
 _COLUMNS = [
-    "symbol", "date", "entry_time", "entry_price",
-    "exit_time", "exit_price", "side", "gap_pct",
+    "symbol", "entry_date", "entry_time", "entry_price",
+    "exit_date", "exit_time", "exit_price", "side", "gap_pct",
     "bars_held", "pnl_abs", "pnl_pct", "mfe_pct", "mae_pct", "exit_reason",
 ]
 
@@ -47,9 +48,10 @@ def write_csv(trades: list[ClosedTrade], path: Path | None = None) -> Path:
         for t in trades:
             writer.writerow({
                 "symbol":      t.symbol,
-                "date":        t.date,
+                "entry_date":  t.entry_date,
                 "entry_time":  t.entry_time,
                 "entry_price": t.entry_price,
+                "exit_date":   t.exit_date,
                 "exit_time":   t.exit_time,
                 "exit_price":  t.exit_price,
                 "side":        t.side,

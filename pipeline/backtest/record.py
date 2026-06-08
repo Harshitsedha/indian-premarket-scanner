@@ -58,7 +58,7 @@ def run_and_record(
     Outcomes come from the engine's ClosedTrade list, matched by date string.
     """
     trades = engine_run(candles, strategy, symbol)
-    trade_by_date: dict[str, ClosedTrade] = {t.date: t for t in trades}
+    trade_by_date: dict[str, ClosedTrade] = {t.entry_date: t for t in trades}
 
     candidates: list[CandidateRow] = []
     dates = sorted(candles["date"].unique())

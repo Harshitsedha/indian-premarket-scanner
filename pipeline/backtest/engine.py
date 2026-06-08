@@ -38,10 +38,11 @@ from backtest.strategy import Action, BarContext, Signal, Strategy
 @dataclass
 class ClosedTrade:
     symbol:       str
-    date:         str    # "2026-06-03"
-    entry_time:   str    # "2026-06-03 09:45:00"
+    entry_date:   str    # "2026-06-03"
+    entry_time:   str    # "09:45:00"
     entry_price:  float
-    exit_time:    str
+    exit_date:    str    # "2026-06-03" (may differ from entry_date for cross-day holds)
+    exit_time:    str    # "15:28:00"
     exit_price:   float
     side:         str    # "LONG"
     gap_pct:      float
@@ -99,12 +100,15 @@ def run(
         pnl_abs = exit_price - ep
         pnl_pct = pnl_abs / ep * 100
         ts      = pd.Timestamp(bar["timestamp"])
+        # Split stored full-datetime entry_time into date + clock
+        entry_dt   = pd.Timestamp(position.entry_time)
         trades.append(ClosedTrade(
             symbol      = symbol,
-            date        = ts.strftime("%Y-%m-%d"),
-            entry_time  = position.entry_time,
+            entry_date  = entry_dt.strftime("%Y-%m-%d"),
+            entry_time  = entry_dt.strftime("%H:%M:%S"),
             entry_price = round(ep, 4),
-            exit_time   = ts.strftime("%Y-%m-%d %H:%M:%S"),
+            exit_date   = ts.strftime("%Y-%m-%d"),
+            exit_time   = ts.strftime("%H:%M:%S"),
             exit_price  = round(exit_price, 4),
             side        = position.side,
             gap_pct     = round(position.gap_pct, 4),
