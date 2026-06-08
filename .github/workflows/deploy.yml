@@ -50,7 +50,7 @@ jobs:
                 echo "ERROR: .next/BUILD_ID was not updated — build may be stale or failed silently" >&2
                 exit 1
               fi
-              sudo systemctl restart premarket-dashboard
+              sudo /usr/bin/systemctl restart premarket-dashboard
               echo "premarket-dashboard restarted"
               cd /opt/premarket
             fi
@@ -63,9 +63,9 @@ jobs:
               find /opt/premarket/pipeline -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
               source pipeline/.venv/bin/activate
               pip install -e pipeline/ --quiet
-              sudo systemctl restart premarket-api
-              sudo systemctl restart premarket-scheduler
-              sudo systemctl restart backtest-worker
+              sudo /usr/bin/systemctl restart premarket-api
+              sudo /usr/bin/systemctl restart premarket-scheduler
+              sudo /usr/bin/systemctl restart backtest-worker
               echo "premarket-api + premarket-scheduler + backtest-worker restarted"
             fi
 
