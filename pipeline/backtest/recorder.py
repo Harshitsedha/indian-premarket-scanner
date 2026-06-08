@@ -1,10 +1,13 @@
 """
 Trade recorder: accumulate ClosedTrade objects and write a CSV.
 
-Output columns (matches user spec exactly):
+Output columns (canonical — defined ONCE in _trade_to_dict):
     symbol, entry_date, entry_time, entry_price,
     exit_date, exit_time, exit_price,
     side, gap_pct, bars_held, pnl_abs, pnl_pct, mfe_pct, mae_pct, exit_reason
+
+All callers that need to serialize a ClosedTrade must go through _trade_to_dict
+so the column list and the field mapping can never drift apart.
 """
 from __future__ import annotations
 
@@ -19,11 +22,37 @@ from backtest.engine import ClosedTrade
 
 _RESULTS_DIR = Path(__file__).parent / "results"
 
-_COLUMNS = [
+# Single source of truth for output column order.
+TRADE_COLUMNS = [
     "symbol", "entry_date", "entry_time", "entry_price",
     "exit_date", "exit_time", "exit_price", "side", "gap_pct",
     "bars_held", "pnl_abs", "pnl_pct", "mfe_pct", "mae_pct", "exit_reason",
 ]
+
+
+def _trade_to_dict(t: ClosedTrade) -> dict:
+    """
+    Canonical serializer for a ClosedTrade.  write_csv and any future
+    DataFrame-based export must use this function — never duplicate the
+    field mapping inline.
+    """
+    return {
+        "symbol":      t.symbol,
+        "entry_date":  t.entry_date,
+        "entry_time":  t.entry_time,
+        "entry_price": t.entry_price,
+        "exit_date":   t.exit_date,
+        "exit_time":   t.exit_time,
+        "exit_price":  t.exit_price,
+        "side":        t.side,
+        "gap_pct":     t.gap_pct,
+        "bars_held":   t.bars_held,
+        "pnl_abs":     t.pnl_abs,
+        "pnl_pct":     t.pnl_pct,
+        "mfe_pct":     t.mfe_pct,
+        "mae_pct":     t.mae_pct,
+        "exit_reason": t.exit_reason,
+    }
 
 
 def write_csv(trades: list[ClosedTrade], path: Path | None = None) -> Path:
@@ -43,26 +72,10 @@ def write_csv(trades: list[ClosedTrade], path: Path | None = None) -> Path:
         raise ValueError("path must be provided (use run.py to auto-generate the name)")
 
     with open(path, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=_COLUMNS)
+        writer = csv.DictWriter(fh, fieldnames=TRADE_COLUMNS)
         writer.writeheader()
         for t in trades:
-            writer.writerow({
-                "symbol":      t.symbol,
-                "entry_date":  t.entry_date,
-                "entry_time":  t.entry_time,
-                "entry_price": t.entry_price,
-                "exit_date":   t.exit_date,
-                "exit_time":   t.exit_time,
-                "exit_price":  t.exit_price,
-                "side":        t.side,
-                "gap_pct":     t.gap_pct,
-                "bars_held":   t.bars_held,
-                "pnl_abs":     t.pnl_abs,
-                "pnl_pct":     t.pnl_pct,
-                "mfe_pct":     t.mfe_pct,
-                "mae_pct":     t.mae_pct,
-                "exit_reason": t.exit_reason,
-            })
+            writer.writerow(_trade_to_dict(t))
 
-    logger.info(f"Wrote {len(trades)} trades → {path}")
+    logger.info(f"Wrote {len(trades)} trades -> {path}")
     return path
