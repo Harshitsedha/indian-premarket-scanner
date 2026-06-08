@@ -834,6 +834,62 @@ def list_all_strategies():
     return _safe(rows)
 
 
+# ── POST /api/backtest/report ─────────────────────────────────────────────────
+
+class _ReportRequest(BaseModel):
+    job_id: str
+
+
+@app.post("/api/backtest/report")
+def generate_backtest_report(req: _ReportRequest):
+    """
+    Load the result CSV for a completed run/train_test job, compute full stats,
+    and return a Claude-written markdown analysis.
+    """
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT mode, status, result_path FROM backtest_jobs WHERE id = %s",
+                (req.job_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        raise HTTPException(404, f"Job {req.job_id} not found")
+    mode, status, result_path = row
+    if status != "done":
+        raise HTTPException(400, "Job is not done yet")
+    if not result_path:
+        raise HTTPException(404, "Job has no result file (record-mode jobs have no trade CSV)")
+    if mode not in ("run", "train_test"):
+        raise HTTPException(400, f"AI report is only available for run/train_test jobs, not {mode!r}")
+
+    path = Path(result_path)
+    if not path.exists():
+        raise HTTPException(404, f"Result file missing on server: {path.name}")
+
+    from backtest.report_stats import load_and_compute
+    from backtest.claude_report import generate_report
+
+    try:
+        stats = load_and_compute(path)
+    except Exception as exc:
+        raise HTTPException(422, f"Stats computation failed: {exc}") from exc
+
+    if stats.get("total_trades", 0) == 0:
+        raise HTTPException(422, "No trades in result CSV — nothing to analyse")
+
+    try:
+        markdown = generate_report(stats)
+    except ValueError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+    return {"markdown": markdown}
+
+
 @app.delete("/api/backtest/strategies/{name}")
 def delete_strategy(name: str):
     """Soft-delete a strategy (sets deleted_at). gap_and_go is immutable — returns 403."""

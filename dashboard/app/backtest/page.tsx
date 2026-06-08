@@ -187,11 +187,69 @@ function SummaryBlock({ job, ruleset }: { job: Job; ruleset: Ruleset | null }) {
   );
 }
 
+// ── Inline markdown renderer (no external dependency) ─────────────────────────
+
+function MarkdownReport({ md }: { md: string }) {
+  function renderInline(text: string): React.ReactNode[] {
+    return text.split(/(\*\*[^*]+\*\*)/g).map((seg, i) =>
+      seg.startsWith("**") && seg.endsWith("**")
+        ? <strong key={i}>{seg.slice(2, -2)}</strong>
+        : <span key={i}>{seg}</span>
+    );
+  }
+
+  const nodes: React.ReactNode[] = [];
+  md.split("\n").forEach((line, i) => {
+    if (line.startsWith("## ")) {
+      nodes.push(
+        <div key={i} style={{ fontSize: 13, fontWeight: 700, color: "var(--accent)", margin: "14px 0 5px", letterSpacing: "0.02em" }}>
+          {line.slice(3)}
+        </div>
+      );
+    } else if (line.startsWith("### ")) {
+      nodes.push(
+        <div key={i} style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", margin: "8px 0 3px" }}>
+          {line.slice(4)}
+        </div>
+      );
+    } else if (/^[-*] /.test(line)) {
+      nodes.push(
+        <div key={i} style={{ display: "flex", gap: 7, fontSize: 12, lineHeight: 1.65, color: "var(--text)", paddingLeft: 4 }}>
+          <span style={{ color: "var(--muted)", flexShrink: 0, marginTop: 1 }}>•</span>
+          <span>{renderInline(line.slice(2))}</span>
+        </div>
+      );
+    } else if (line.trim() === "---") {
+      nodes.push(<div key={i} style={{ borderTop: "1px solid var(--border)", margin: "8px 0" }} />);
+    } else if (line.trim() !== "") {
+      nodes.push(
+        <p key={i} style={{ fontSize: 12, lineHeight: 1.7, color: "var(--text)", margin: "3px 0" }}>
+          {renderInline(line)}
+        </p>
+      );
+    }
+  });
+
+  return (
+    <div style={{
+      marginTop: 10, padding: "14px 16px",
+      backgroundColor: "var(--surface)", borderRadius: 10,
+      border: "1px solid var(--border)",
+    }}>
+      {nodes}
+    </div>
+  );
+}
+
+
 // ── Job list row ──────────────────────────────────────────────────────────────
 
 function JobRow({ job }: { job: Job }) {
-  const [expanded, setExpanded] = useState(false);
-  const [ruleset, setRuleset]   = useState<Ruleset | null>(null);
+  const [expanded, setExpanded]     = useState(false);
+  const [ruleset, setRuleset]       = useState<Ruleset | null>(null);
+  const [reportState, setReportState] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const [reportMd, setReportMd]     = useState("");
+  const [reportError, setReportError] = useState("");
 
   // Fetch ruleset on expand if this is a done train_test job
   useEffect(() => {
@@ -202,6 +260,34 @@ function JobRow({ job }: { job: Job }) {
         .catch(() => {});
     }
   }, [expanded, job.id, job.mode, job.status, ruleset]);
+
+  const canReport = (
+    job.status === "done" &&
+    job.result_path &&
+    (job.mode === "run" || job.mode === "train_test")
+  );
+
+  async function handleGenerateReport() {
+    setReportState("loading");
+    setReportError("");
+    try {
+      const res = await fetch("/api/backtest/report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: job.id }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({})) as { detail?: string };
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json() as { markdown: string };
+      setReportMd(data.markdown);
+      setReportState("done");
+    } catch (err) {
+      setReportError(err instanceof Error ? err.message : "Unknown error");
+      setReportState("error");
+    }
+  }
 
   return (
     <div style={{ borderBottom: "1px solid var(--border)" }}>
@@ -256,6 +342,66 @@ function JobRow({ job }: { job: Job }) {
                 : "Waiting in queue"}
             </p>
           )}
+
+          {canReport && (
+            <div style={{ marginTop: 4 }}>
+              {reportState === "idle" && (
+                <button
+                  type="button"
+                  onClick={handleGenerateReport}
+                  style={{
+                    fontSize: 12, padding: "5px 14px", borderRadius: 8, cursor: "pointer",
+                    border: "1px solid var(--border)",
+                    backgroundColor: "transparent", color: "var(--accent)",
+                  }}
+                >
+                  Generate AI Report
+                </button>
+              )}
+              {reportState === "loading" && (
+                <p style={{ fontSize: 12, color: "var(--muted)", margin: 0, fontStyle: "italic" }}>
+                  Generating report…
+                </p>
+              )}
+              {reportState === "error" && (
+                <p style={{ fontSize: 12, color: "var(--bearish)", margin: 0 }}>
+                  Report failed: {reportError}{" "}
+                  <button
+                    type="button"
+                    onClick={handleGenerateReport}
+                    style={{ fontSize: 12, background: "none", border: "none", color: "var(--accent)", cursor: "pointer", padding: 0 }}
+                  >
+                    Retry
+                  </button>
+                </p>
+              )}
+              {reportState === "done" && (
+                <>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 2 }}>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                      AI Report
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => { setReportState("idle"); setReportMd(""); }}
+                      style={{ fontSize: 11, background: "none", border: "none", color: "var(--muted)", cursor: "pointer", padding: 0 }}
+                    >
+                      ✕ dismiss
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleGenerateReport}
+                      style={{ fontSize: 11, background: "none", border: "none", color: "var(--muted)", cursor: "pointer", padding: 0 }}
+                    >
+                      ↺ regenerate
+                    </button>
+                  </div>
+                  <MarkdownReport md={reportMd} />
+                </>
+              )}
+            </div>
+          )}
+
           <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "monospace", marginTop: 4 }}>
             id: {job.id}
           </div>
