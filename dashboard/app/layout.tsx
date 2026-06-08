@@ -25,8 +25,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           {[
             { href: "/",          label: "Today"    },
             { href: "/news",      label: "News"     },
-            { href: "/history",   label: "History"  },
-            { href: "/edge",      label: "Edge"     },
+            // TEMP: disabled, re-enable later
+            // { href: "/history",   label: "History"  },
+            // { href: "/edge",      label: "Edge"     },
             { href: "/backtest",  label: "Backtest" },
           ].map(({ href, label }) => (
             <Link
