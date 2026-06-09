@@ -37,6 +37,7 @@ from loguru import logger
 from utils.config import settings
 from utils.logger import setup_logger
 from backtest.exceptions import _JobCancelled
+from backtest.retention import run_retention
 from backtest.run import run_single, run_multi
 
 # Hard limit per job. SIGALRM is UNIX-only; this worker runs on a Linux VPS.
@@ -252,6 +253,14 @@ def main() -> None:
                         signal.alarm(0)
                         _set_done(conn, jid, result_path, summary)
                         logger.info(f"[{jid[:8]}] Done -> {result_path}")
+                        # Retention runs after _set_done commits so the just-finished
+                        # job is in the DB and counted among the 5 to keep.
+                        # Inner try/except is a hard firewall — retention failure must
+                        # never reach the job exception handlers below.
+                        try:
+                            run_retention(conn, job["mode"])
+                        except Exception as exc:
+                            logger.error(f"[{jid[:8]}] Retention error (job already succeeded): {exc}")
                     except _JobCancelled as exc:
                         # Most specific first — must precede bare Exception
                         signal.alarm(0)
