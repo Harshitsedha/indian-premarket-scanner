@@ -29,6 +29,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             // { href: "/history",   label: "History"  },
             // { href: "/edge",      label: "Edge"     },
             { href: "/backtest",  label: "Backtest" },
+            { href: "/radar",     label: "Radar"    },
           ].map(({ href, label }) => (
             <Link
               key={href}

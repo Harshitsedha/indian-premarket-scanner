@@ -20,6 +20,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from loguru import logger                                       # noqa: E402
+from utils.config import settings                              # noqa: E402
 from utils.logger import setup_logger                          # noqa: E402
 from ingestion.pulse_scraper import scrape_pulse               # noqa: E402
 from ingestion.nse_scraper import fetch_nse_data               # noqa: E402
@@ -33,9 +34,43 @@ from storage.database import save_briefing                     # noqa: E402
 from delivery.telegram_bot import send_briefing as telegram_send  # noqa: E402
 
 
-async def run(save: bool = False, notify: bool = False) -> dict:
+async def run(save: bool = False, notify: bool = False, force_baselines: bool = False) -> dict:
     setup_logger("INFO")
     logger.info("=== PreMarket Pro pipeline starting ===")
+
+    # Step 0 -- Radar baselines (non-fatal; must not block the briefing)
+    logger.info("Step 0 -- Radar baselines")
+    try:
+        from datetime import date as _date
+        from processing.radar_baselines import run_baselines, baselines_already_computed
+        _trade_date = _date.today().isoformat()
+        if not force_baselines and baselines_already_computed(_trade_date):
+            logger.info(
+                "  Radar baselines: ≥90% of universe already computed for today, skipping "
+                "(use --force-baselines to override)"
+            )
+        else:
+            import asyncio as _asyncio
+            _result = await _asyncio.get_event_loop().run_in_executor(None, run_baselines)
+            logger.info(
+                f"  Radar baselines: {_result['computed']} computed, "
+                f"{_result['failed']} failed, {_result['total']} total"
+            )
+    except Exception as _exc:
+        logger.warning(f"  Radar baselines failed (non-fatal): {_exc}")
+        try:
+            import httpx as _httpx
+            _httpx.post(
+                f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
+                json={
+                    "chat_id": settings.telegram_chat_id,
+                    "text": f"⚠️ Radar baselines failed (non-fatal):\n<code>{_exc}</code>",
+                    "parse_mode": "HTML",
+                },
+                timeout=10,
+            )
+        except Exception:
+            pass
 
     # Step 1 -- Ingestion
     logger.info("Step 1/5 -- Ingestion")
@@ -154,9 +189,12 @@ async def run(save: bool = False, notify: bool = False) -> dict:
 
 
 if __name__ == "__main__":
-    save_flag   = "--no-save" not in sys.argv   # save by default; --no-save for dry run
-    notify_flag = "--notify"  in sys.argv
+    save_flag            = "--no-save"        not in sys.argv   # save by default
+    notify_flag          = "--notify"         in sys.argv
+    force_baselines_flag = "--force-baselines" in sys.argv
     if not save_flag:
         print("[dry run] --no-save: briefing will NOT be written to the database")
-    result = asyncio.run(run(save=save_flag, notify=notify_flag))
+    if force_baselines_flag:
+        print("[--force-baselines] radar baseline idempotency guard bypassed")
+    result = asyncio.run(run(save=save_flag, notify=notify_flag, force_baselines=force_baselines_flag))
     sys.exit(0)

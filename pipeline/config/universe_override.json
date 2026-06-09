@@ -1,0 +1,5 @@
+{
+  "_comment": "Manual universe override. Set _enabled to true to inject extra symbols into the radar universe.",
+  "_enabled": false,
+  "symbols": []
+}

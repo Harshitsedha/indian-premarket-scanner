@@ -7,7 +7,7 @@ All endpoints use psycopg2 sync — FastAPI runs them in a thread pool.
 import json
 import sys
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -134,6 +134,52 @@ def market_snapshot():
     payload = _safe({"tiles": tiles})
     _cache.set_ex(_SNAPSHOT_CACHE_KEY, payload, _SNAPSHOT_TTL)
     return payload
+
+
+# ── GET /api/radar ────────────────────────────────────────────────────────────
+
+_RADAR_SNAPSHOT_KEY = "radar:snapshot"
+_RADAR_STATUS_KEY   = "radar:status"
+_RADAR_STALE_SECS   = 180   # snapshot older than 3 min is considered stale
+_IST                = timedelta(hours=5, minutes=30)
+
+@app.get("/api/radar")
+def radar():
+    """
+    Return the latest intraday radar snapshot from Redis plus a market_open flag.
+    The snapshot is produced by pipeline/realtime/radar_poller.py every 45 s.
+    Returns stale=true if the snapshot is >3 min old. Returns the last snapshot
+    regardless of age — never 404 — so the UI can always render something.
+    """
+    snapshot = _cache.get(_RADAR_SNAPSHOT_KEY)
+    status   = _cache.get(_RADAR_STATUS_KEY) or {}
+
+    stale = False
+    if snapshot:
+        try:
+            generated_at = datetime.fromisoformat(snapshot["generated_at"])
+            if generated_at.tzinfo is None:
+                generated_at = generated_at.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - generated_at).total_seconds()
+            stale = age > _RADAR_STALE_SECS
+        except Exception:
+            stale = True
+
+    now_ist  = datetime.now(timezone.utc).astimezone(timezone(_IST))
+    wd       = now_ist.weekday()   # 0 = Mon, 6 = Sun
+    h, m     = now_ist.hour, now_ist.minute
+    market_open = (
+        wd < 5
+        and (h > 9 or (h == 9 and m >= 15))
+        and (h < 15 or (h == 15 and m <= 30))
+    )
+
+    return {
+        "snapshot":    snapshot,
+        "stale":       stale,
+        "market_open": market_open,
+        "status":      status,
+    }
 
 
 # ── GET /api/briefing/today ───────────────────────────────────────────────────
