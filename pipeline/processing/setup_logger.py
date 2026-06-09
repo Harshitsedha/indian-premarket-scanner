@@ -68,22 +68,25 @@ def log_setups(
                         INSERT INTO setups (
                             trading_date, symbol, setup_type, hypothesis,
                             bias_direction, bias_confidence,
-                            gap_pct, gap_source, score, signals, thesis
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            gap_pct, gap_source, score, signals, thesis,
+                            catalyst_line, direction
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
                         """,
                         (
                             trading_date,
                             symbol,
                             stock.get("setup_type"),
-                            stock.get("sentiment"),           # hypothesis = expected direction
+                            stock.get("sentiment"),                # hypothesis = expected direction
                             bias_direction,
                             bias_confidence,
-                            signals.get("prior_session_gap_pct"),  # stored in gap_pct DB column
-                            signals.get("move_source"),          # stored in gap_source DB column
+                            signals.get("prior_session_gap_pct"), # stored in gap_pct DB column
+                            signals.get("move_source"),            # stored in gap_source DB column
                             stock.get("score"),
                             psycopg2.extras.Json(signals),
                             stock.get("thesis"),
+                            stock.get("catalyst_line"),            # new: trader-facing one-liner
+                            stock.get("direction"),                # new: bullish|bearish|neutral
                         ),
                     )
                     setup_id = cur.fetchone()[0]

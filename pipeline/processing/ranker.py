@@ -118,6 +118,13 @@ _DISPLAY: dict[str, str] = {
 
 _FII_RE = re.compile(r"FII:\s*([+-]?\d+(?:\.\d+)?)\s*cr", re.IGNORECASE)
 
+# ── quality-threshold config ──────────────────────────────────────────────────
+# A stock must clear at least ONE of these bars to appear in the briefing.
+# Tune SALIENCE_THRESHOLD to widen/narrow the output.
+SALIENCE_THRESHOLD: float = 0.30   # composite score floor
+_GAP_OVERRIDE_PCT:  float = 2.0    # abs(gap_pct) that bypasses salience floor
+_MENTION_OVERRIDE:  int   = 2      # mention_count that bypasses salience floor
+
 
 # -- helpers ------------------------------------------------------------------
 
@@ -369,6 +376,21 @@ def rank_stocks(
         if final <= 0:
             continue
 
+        # Quality gate: must clear salience threshold OR gap override OR mention override.
+        qualifies = (
+            final >= SALIENCE_THRESHOLD
+            or abs(stock_move_pct) >= _GAP_OVERRIDE_PCT
+            or mention_count >= _MENTION_OVERRIDE
+        )
+        if not qualifies:
+            logger.info(
+                f"Ranker excluded {symbol}: score={final:.4f} "
+                f"gap={stock_move_pct:+.2f}% mentions={mention_count} "
+                f"(threshold={SALIENCE_THRESHOLD}, gap_bar={_GAP_OVERRIDE_PCT}%, "
+                f"mention_bar={_MENTION_OVERRIDE})"
+            )
+            continue
+
         setup = _setup_type(mention_score, fii_score, stock_move_score)
 
         top_reason: str | None = None
@@ -398,10 +420,10 @@ def rank_stocks(
         })
 
     scored.sort(key=lambda s: s["score"], reverse=True)
-    top = scored[:7]
 
-    # Assign rank and reorder keys so rank comes first
-    result = [{"rank": idx, **entry} for idx, entry in enumerate(top, 1)]
+    # Assign rank and reorder keys so rank comes first.
+    # No hard cap: threshold filtering above already removes low-quality entries.
+    result = [{"rank": idx, **entry} for idx, entry in enumerate(scored, 1)]
 
     top_symbols = [e["symbol"] for e in result[:3]]
     if live_gaps:
@@ -411,9 +433,11 @@ def rank_stocks(
     else:
         overall_source = "proxy"
     logger.info(
-        f"Ranker: {len(scored)}/{len(SCAN_WATCHLIST)} stocks scored > 0, "
+        f"Ranker: {len(result)} stocks qualify (salience≥{SALIENCE_THRESHOLD} or "
+        f"gap≥{_GAP_OVERRIDE_PCT}% or mentions≥{_MENTION_OVERRIDE}) "
+        f"out of {len(SCAN_WATCHLIST)} watchlist  "
         f"top 3: {top_symbols}  "
-        f"(market_proxy={market_proxy_pct:+.2f}%, fii={fii_dir}, move_source={overall_source})"
+        f"(proxy={market_proxy_pct:+.2f}%, fii={fii_dir}, move_src={overall_source})"
     )
     return result
 

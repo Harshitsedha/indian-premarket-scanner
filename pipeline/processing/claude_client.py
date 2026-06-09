@@ -68,6 +68,26 @@ _SYSTEM_EDGE = (
     "Write in plain text — no markdown, no JSON."
 )
 
+# ── catalyst schema ───────────────────────────────────────────────────────────
+
+_CATALYST_SCHEMA = """{
+  "stocks": [
+    {
+      "symbol": "RELIANCE",
+      "catalyst_line": "Q4 profit beats by 8%; Jio ARPU expansion drives bullish open",
+      "direction": "bullish",
+      "setup_type": "news_momentum"
+    }
+  ]
+}"""
+
+# direction must be one of these (others fall back to "neutral")
+_VALID_DIRECTIONS: frozenset[str] = frozenset({"bullish", "bearish", "neutral"})
+# setup_type must be one of these (others fall back to "other")
+_VALID_SETUP_TYPES: frozenset[str] = frozenset(
+    {"gap_up_continuation", "gap_fade", "news_momentum", "sympathy", "gap_play", "other"}
+)
+
 
 # ── internal helpers ──────────────────────────────────────────────────────────
 
@@ -198,6 +218,103 @@ def analyse_news(headlines: list[dict[str, Any]]) -> dict[str, Any]:
             h["symbols"] = []
 
     return result
+
+
+def generate_stock_catalysts(
+    ranked_stocks: list[dict[str, Any]],
+    headlines: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """
+    For each ranked stock generate: catalyst_line, direction, setup_type.
+
+    Returns a dict keyed by UPPER symbol:
+        {"RELIANCE": {"catalyst_line": "...", "direction": "bullish", "setup_type": "news_momentum"}}
+
+    On any failure (API error, parse error) the symbol's entry falls back to:
+        catalyst_line = existing thesis text
+        direction     = stock sentiment (already computed by ranker)
+        setup_type    = "other"
+
+    Never raises — all errors are logged and swallowed.
+    """
+    if not ranked_stocks:
+        return {}
+
+    # Pre-compute fallback from whatever the ranker already knows
+    fallback: dict[str, dict[str, Any]] = {
+        s["symbol"].upper(): {
+            "catalyst_line": str(s.get("thesis") or "")[:150],
+            "direction":     str(s.get("sentiment") or "neutral").lower(),
+            "setup_type":    "other",
+        }
+        for s in ranked_stocks
+    }
+
+    # Build a lookup: symbol -> list of matching headline texts (from Claude symbol tags)
+    sym_headlines: dict[str, list[str]] = {s["symbol"]: [] for s in ranked_stocks}
+    for h in headlines:
+        for sym in h.get("symbols") or []:
+            if sym in sym_headlines:
+                sym_headlines[sym].append(h.get("headline", "")[:120])
+
+    # Compose the user prompt
+    stock_lines: list[str] = ["Stocks to analyse (pre-market, NSE India):"]
+    for s in ranked_stocks:
+        sym  = s["symbol"]
+        gap  = float((s.get("signals") or {}).get("prior_session_gap_pct") or 0)
+        cnt  = int(s.get("mention_count") or 0)
+        sent = str(s.get("sentiment") or "neutral")
+        stock_lines.append(f"- {sym}: gap={gap:+.1f}%, mentions={cnt}, sentiment={sent}")
+        for hl in sym_headlines.get(sym, [])[:3]:
+            stock_lines.append(f"    * {hl}")
+
+    prompt = (
+        "\n".join(stock_lines) + "\n\n"
+        "Rules:\n"
+        "  catalyst_line: ≤120 chars, trader-focused, states the actual catalyst.\n"
+        "    If gap with no news: write '{gap:+.1f}% prior-session gap, no news — "
+        "momentum continuation watch' (fill in real number).\n"
+        "    NOT 'X headline mention' — that is banned.\n"
+        "  direction: expected price direction at open (bullish|bearish|neutral).\n"
+        "  setup_type: gap_up_continuation|gap_fade|news_momentum|sympathy|gap_play|other\n\n"
+        f"Return ONLY this JSON (no other text):\n{_CATALYST_SCHEMA}"
+    )
+
+    client = anthropic.Anthropic()
+    try:
+        response = _call_claude(client, _SYSTEM_NEWS, prompt, max_tokens=1024)
+    except anthropic.APIError as exc:
+        logger.warning(f"generate_stock_catalysts: API failed: {exc} — using fallback")
+        return fallback
+
+    _log_usage("generate_stock_catalysts", response)
+
+    try:
+        parsed = _extract_json(response.content[0].text)
+    except (ValueError, KeyError) as exc:
+        logger.warning(f"generate_stock_catalysts: parse failed: {exc} — using fallback")
+        return fallback
+
+    out: dict[str, dict[str, Any]] = {}
+    for entry in parsed.get("stocks") or []:
+        sym = str(entry.get("symbol") or "").upper()
+        if not sym:
+            continue
+        direction  = str(entry.get("direction")  or "neutral").lower()
+        setup_type = str(entry.get("setup_type") or "other").lower()
+        out[sym] = {
+            "catalyst_line": str(entry.get("catalyst_line") or "")[:150],
+            "direction":     direction  if direction  in _VALID_DIRECTIONS  else "neutral",
+            "setup_type":    setup_type if setup_type in _VALID_SETUP_TYPES else "other",
+        }
+
+    # Fill any symbols Claude omitted with the fallback
+    for sym, fb in fallback.items():
+        if sym not in out:
+            logger.debug(f"generate_stock_catalysts: {sym} missing from response — fallback")
+            out[sym] = fb
+
+    return out
 
 
 def generate_edge_report(setups: list[dict[str, Any]]) -> str:

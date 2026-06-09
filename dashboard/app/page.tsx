@@ -1,6 +1,7 @@
 import { BiasCard } from "./components/BiasCard";
 import { StockCard } from "./components/StockCard";
 import { TopNews, type TopHeadline } from "./components/TopNews";
+import { MarketSnapshot } from "./components/MarketSnapshot";
 
 const API = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8001";
 
@@ -10,11 +11,21 @@ type Stock = {
   sentiment: string;
   setup_type: string;
   thesis: string;
+  catalyst_line: string | null;
+  direction: string | null;
   score: number;
   gap_pct: number | null;
   gap_source: string | null;
   mention_count: number;
   signals: Record<string, number | string>;
+};
+
+type SnapTile = {
+  label: string;
+  category: string;
+  last: number | null;
+  change_pct: number | null;
+  stale: boolean;
 };
 
 export default async function TodayPage() {
@@ -31,16 +42,22 @@ export default async function TodayPage() {
   };
 
   let topHeadlines: TopHeadline[] = [];
+  let snapTiles: SnapTile[] = [];
 
   try {
-    const [briefingRes, newsRes] = await Promise.all([
+    const [briefingRes, newsRes, snapRes] = await Promise.all([
       fetch(`${API}/api/briefing/today`, { cache: "no-store" }),
       fetch(`${API}/api/news/today`, { cache: "no-store" }),
+      fetch(`${API}/api/market-snapshot`, { cache: "no-store" }),
     ]);
     if (briefingRes.ok) data = await briefingRes.json();
     if (newsRes.ok) {
       const newsData = await newsRes.json();
       topHeadlines = (newsData.headlines ?? []).slice(0, 3);
+    }
+    if (snapRes.ok) {
+      const snapData = await snapRes.json();
+      snapTiles = snapData.tiles ?? [];
     }
   } catch {
     /* API unreachable — show empty state */
@@ -48,6 +65,9 @@ export default async function TodayPage() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {/* Market snapshot glance bar */}
+      <MarketSnapshot initial={snapTiles} />
+
       <h1 style={{ color: "var(--muted)", fontSize: 20, fontWeight: 500, marginBottom: 8 }}>
         Today&apos;s Pre-Market Briefing
       </h1>
@@ -76,7 +96,7 @@ export default async function TodayPage() {
 
       <TopNews headlines={topHeadlines} />
 
-      {data.stocks.length > 0 && (
+      {data.stocks.length > 0 ? (
         <>
           <p style={{ color: "var(--muted)", fontSize: 13, fontWeight: 500, marginTop: 4 }}>
             Stocks in Play — {data.stocks.length} ranked
@@ -93,7 +113,19 @@ export default async function TodayPage() {
             ))}
           </div>
         </>
-      )}
+      ) : data.bias ? (
+        /* Briefing exists but no stocks cleared the threshold */
+        <p
+          style={{
+            color: "var(--muted)",
+            fontSize: 13,
+            fontStyle: "italic",
+            marginTop: 4,
+          }}
+        >
+          No high-conviction names today.
+        </p>
+      ) : null}
     </div>
   );
 }

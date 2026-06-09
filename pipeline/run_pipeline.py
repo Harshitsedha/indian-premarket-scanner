@@ -25,7 +25,7 @@ from ingestion.pulse_scraper import scrape_pulse               # noqa: E402
 from ingestion.nse_scraper import fetch_nse_data               # noqa: E402
 from ingestion.global_cues import fetch_global_cues, bias_summary  # noqa: E402
 from processing.normaliser import normalise                    # noqa: E402
-from processing.claude_client import analyse_news, ClaudeClientError  # noqa: E402
+from processing.claude_client import analyse_news, generate_stock_catalysts, ClaudeClientError  # noqa: E402
 from processing.bias_engine import compute_bias                # noqa: E402
 from processing.ranker import rank_stocks                      # noqa: E402
 from processing.setup_logger import log_setups                 # noqa: E402
@@ -89,9 +89,21 @@ async def run(save: bool = False, notify: bool = False) -> dict:
     # Step 5 -- Rank stocks
     logger.info("Step 5/5 -- Ranking stocks in play")
     stocks = rank_stocks(normalised, analysis)
-    logger.info(f"  {len(stocks)} stocks in play")
+    logger.info(f"  {len(stocks)} stocks qualify after threshold filtering")
 
-    # Step 5b -- Log setups for edge tracking (non-fatal if DB unavailable)
+    # Step 5b -- Generate per-stock catalyst lines via Claude (non-fatal)
+    try:
+        catalysts = generate_stock_catalysts(stocks, normalised.get("headlines") or [])
+        for s in stocks:
+            cat = catalysts.get(s["symbol"], {})
+            s["catalyst_line"] = cat.get("catalyst_line") or s.get("thesis", "")
+            s["direction"]     = cat.get("direction")     or s.get("sentiment", "neutral")
+            s["setup_type"]    = cat.get("setup_type")    or s.get("setup_type", "other")
+        logger.info(f"  Catalyst lines generated for {len(catalysts)} stocks")
+    except Exception as exc:
+        logger.warning(f"  Catalyst generation failed (non-fatal): {exc}")
+
+    # Step 5c -- Log setups for edge tracking (non-fatal if DB unavailable)
     try:
         setup_ids = log_setups(stocks, analysis)
         logger.info(f"  Logged {len(setup_ids)} setups for today")
@@ -115,9 +127,10 @@ async def run(save: bool = False, notify: bool = False) -> dict:
     )
     print(f"\nStocks in play ({len(stocks)}):")
     for s in stocks:
+        catalyst = s.get("catalyst_line") or s.get("thesis", "")
         print(
             f"  [{s['rank']}] {s['symbol']:<15} score={s['score']:.3f}  "
-            f"{s['sentiment']:<8}  {s['setup_type']:<15}  {s['thesis']}"
+            f"{s.get('direction', s['sentiment']):<8}  {s['setup_type']:<20}  {catalyst}"
         )
     print("=" * 60)
 

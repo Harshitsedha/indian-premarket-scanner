@@ -1,9 +1,15 @@
+"use client";
+
+import { useState } from "react";
+
 type Stock = {
   rank: number | null;
   symbol: string;
   sentiment: string;
   setup_type: string;
   thesis: string;
+  catalyst_line: string | null;
+  direction: string | null;
   score: number;
   gap_pct: number | null;
   gap_source: string | null;
@@ -11,35 +17,85 @@ type Stock = {
   signals: Record<string, number | string>;
 };
 
+// ── display maps ──────────────────────────────────────────────────────────────
+
 const SENT_EMOJI: Record<string, string> = { bullish: "🟢", bearish: "🔴", neutral: "⚪" };
-const SENT_COLOR: Record<string, string> = {
+
+const DIR_COLOR: Record<string, string> = {
   bullish: "var(--bullish)",
   bearish: "var(--bearish)",
   neutral: "var(--neutral)",
 };
-const SETUP_COLOR: Record<string, string> = {
-  news_catalyst: "#7C6FE0",
-  gap_play:      "#3B82F6",
-  fii_driven:    "#F97316",
-  watchlist:     "#6B7280",
+
+const DIR_BORDER: Record<string, string> = {
+  bullish: "3px solid var(--bullish)",
+  bearish: "3px solid var(--bearish)",
+  neutral: "1px solid var(--border)",
 };
 
-const SIGNALS = [
-  { key: "news_mention",  label: "M" },
-  { key: "importance",    label: "I" },
-  { key: "gap_potential", label: "G" },
-  { key: "fii_alignment", label: "F" },
-] as const;
+// Human-readable setup labels (new Claude schema + legacy ranker values)
+const SETUP_LABEL: Record<string, string> = {
+  gap_up_continuation: "Gap Up Cont.",
+  gap_fade:            "Gap Fade",
+  news_momentum:       "News Momentum",
+  sympathy:            "Sympathy",
+  gap_play:            "Gap Play",
+  other:               "Other",
+  // legacy ranker values
+  news_catalyst:       "News Catalyst",
+  fii_driven:          "FII Driven",
+  watchlist:           "Watchlist",
+};
+
+const SETUP_COLOR: Record<string, string> = {
+  gap_up_continuation: "#1D9E75",   // green family
+  gap_fade:            "#E05252",   // red family
+  news_momentum:       "#7C6FE0",   // purple (accent)
+  sympathy:            "#F97316",   // orange
+  gap_play:            "#3B82F6",   // blue
+  other:               "#6B7280",   // gray
+  // legacy
+  news_catalyst:       "#7C6FE0",
+  fii_driven:          "#F97316",
+  watchlist:           "#6B7280",
+};
+
+// Signal component display info for the hover tooltip (matches ranker.py keys)
+const SIG_LABELS: { key: string; label: string }[] = [
+  { key: "news_mention",  label: "Mentions" },
+  { key: "importance",    label: "Importance" },
+  { key: "move_score",    label: "Gap" },
+  { key: "fii_alignment", label: "FII" },
+];
+
+// ── component ─────────────────────────────────────────────────────────────────
 
 export function StockCard({ stock }: { stock: Stock }) {
-  const sentColor = SENT_COLOR[stock.sentiment] ?? "var(--neutral)";
+  const [tipVisible, setTipVisible] = useState(false);
+
+  const dir        = (stock.direction || stock.sentiment || "neutral").toLowerCase();
+  const dirColor   = DIR_COLOR[dir]   ?? "var(--neutral)";
+  const borderLeft = DIR_BORDER[dir]  ?? "1px solid var(--border)";
+
   const setupColor = SETUP_COLOR[stock.setup_type] ?? "#6B7280";
+  const setupLabel = SETUP_LABEL[stock.setup_type] ?? stock.setup_type.replace(/_/g, " ");
+
+  // Primary display text: catalyst_line preferred over thesis
+  const displayText = (stock.catalyst_line || stock.thesis || "").trim();
+
+  const sig = stock.signals ?? {};
+  const breakdown = SIG_LABELS.map(
+    ({ key, label }) => `${label} ${Number(sig[key] ?? 0).toFixed(2)}`
+  ).join("  ·  ");
+
+  const scoreBarPct = Math.min(Math.max(stock.score, 0), 1) * 100;
 
   return (
     <div
       style={{
         backgroundColor: "var(--surface)",
         border: "1px solid var(--border)",
+        borderLeft,
         borderRadius: 10,
         padding: 14,
         display: "flex",
@@ -47,8 +103,8 @@ export function StockCard({ stock }: { stock: Stock }) {
         gap: 8,
       }}
     >
-      {/* Header: rank · symbol · emoji · setup pill */}
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      {/* Header: rank · symbol · emoji · setup pill · direction chip */}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
         {stock.rank != null && (
           <span
             style={{
@@ -64,10 +120,11 @@ export function StockCard({ stock }: { stock: Stock }) {
             #{stock.rank}
           </span>
         )}
-        <span style={{ color: sentColor, fontSize: 16, fontWeight: 600, flex: 1 }}>
+        <span style={{ color: dirColor, fontSize: 16, fontWeight: 600, flex: 1 }}>
           {stock.symbol}
         </span>
         <span style={{ fontSize: 14 }}>{SENT_EMOJI[stock.sentiment] ?? "⚪"}</span>
+        {/* Setup type pill */}
         <span
           style={{
             backgroundColor: setupColor + "28",
@@ -79,11 +136,29 @@ export function StockCard({ stock }: { stock: Stock }) {
             flexShrink: 0,
           }}
         >
-          {stock.setup_type.replace(/_/g, " ")}
+          {setupLabel}
         </span>
+        {/* Direction chip — only if a real direction is set and non-neutral */}
+        {dir !== "neutral" && (
+          <span
+            style={{
+              backgroundColor: dirColor + "22",
+              color: dirColor,
+              border: `1px solid ${dirColor}44`,
+              fontSize: 10,
+              padding: "2px 7px",
+              borderRadius: 999,
+              flexShrink: 0,
+              fontWeight: 600,
+              textTransform: "capitalize",
+            }}
+          >
+            {dir}
+          </span>
+        )}
       </div>
 
-      {/* Thesis */}
+      {/* Catalyst / thesis text */}
       <p
         style={{
           color: "var(--muted)",
@@ -96,7 +171,7 @@ export function StockCard({ stock }: { stock: Stock }) {
           overflow: "hidden",
         }}
       >
-        {stock.thesis}
+        {displayText}
       </p>
 
       {/* Stats row */}
@@ -120,41 +195,58 @@ export function StockCard({ stock }: { stock: Stock }) {
         {stock.mention_count} mention{stock.mention_count !== 1 ? "s" : ""}
       </p>
 
-      {/* Signal bars: M / I / G / F */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
-        {SIGNALS.map(({ key, label }) => {
-          const val = Math.min(Math.max(Number(stock.signals?.[key] ?? 0), 0), 1);
-          return (
-            <div key={key} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-              <div
-                style={{
-                  height: 2,
-                  borderRadius: 1,
-                  backgroundColor: "var(--border)",
-                  position: "relative",
-                  overflow: "hidden",
-                }}
-              >
-                <div
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    height: 2,
-                    width: `${val * 100}%`,
-                    backgroundColor: "var(--accent)",
-                    borderRadius: 1,
-                  }}
-                />
-              </div>
-              <span
-                style={{ fontSize: 10, color: "var(--muted)", textAlign: "center" }}
-              >
-                {label}
-              </span>
-            </div>
-          );
-        })}
+      {/* Single composite score bar with breakdown tooltip on hover/focus */}
+      <div
+        tabIndex={0}
+        role="img"
+        aria-label={`Salience score ${stock.score.toFixed(2)}. ${breakdown}`}
+        style={{ position: "relative", cursor: "default", outline: "none" }}
+        onMouseEnter={() => setTipVisible(true)}
+        onMouseLeave={() => setTipVisible(false)}
+        onFocus={() => setTipVisible(true)}
+        onBlur={() => setTipVisible(false)}
+      >
+        {/* Bar track */}
+        <div
+          style={{
+            height: 4,
+            borderRadius: 2,
+            backgroundColor: "var(--border)",
+            overflow: "hidden",
+          }}
+        >
+          <div
+            style={{
+              height: 4,
+              width: `${scoreBarPct}%`,
+              backgroundColor: "var(--accent)",
+              borderRadius: 2,
+              transition: "width 0.3s ease",
+            }}
+          />
+        </div>
+
+        {/* Breakdown tooltip */}
+        {tipVisible && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: "calc(100% + 6px)",
+              left: 0,
+              backgroundColor: "#12121a",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              padding: "5px 10px",
+              fontSize: 11,
+              color: "var(--muted)",
+              whiteSpace: "nowrap",
+              zIndex: 20,
+              pointerEvents: "none",
+            }}
+          >
+            {breakdown}
+          </div>
+        )}
       </div>
     </div>
   );

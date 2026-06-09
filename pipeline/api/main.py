@@ -29,6 +29,7 @@ from processing.edge_stats import build_stats, query_rows
 from processing.tagging_universe import TAGGING_UNIVERSE_SET
 from backtest.features import FEATURES, parse_features
 from backtest.recorder import _RESULTS_DIR
+import storage.redis_client as _cache
 
 app = FastAPI(title="PreMarket Pro API", version="1.0.0")
 
@@ -107,6 +108,34 @@ def health():
     }
 
 
+# ── GET /api/market-snapshot ─────────────────────────────────────────────────
+
+_SNAPSHOT_CACHE_KEY = "market_snapshot:v1"
+_SNAPSHOT_TTL       = 60   # seconds
+
+@app.get("/api/market-snapshot")
+def market_snapshot():
+    """
+    Return live market snapshot tiles (indices, commodities, FX).
+    Cached in Redis for 60 s. Each failed tile has stale=True and null prices
+    rather than raising an error — the caller should render '—' for stale tiles.
+    """
+    cached = _cache.get(_SNAPSHOT_CACHE_KEY)
+    if cached is not None:
+        return cached
+
+    try:
+        from ingestion.market_snapshot import fetch_snapshot
+        tiles = fetch_snapshot()
+    except Exception as exc:
+        logger.error(f"market_snapshot fetch failed: {exc}")
+        tiles = []
+
+    payload = _safe({"tiles": tiles})
+    _cache.set_ex(_SNAPSHOT_CACHE_KEY, payload, _SNAPSHOT_TTL)
+    return payload
+
+
 # ── GET /api/briefing/today ───────────────────────────────────────────────────
 
 @app.get("/api/briefing/today")
@@ -153,6 +182,8 @@ def briefing_today():
                     s.gap_source,
                     s.signals,
                     s.thesis,
+                    s.catalyst_line,
+                    s.direction,
                     s.bias_confidence,
                     sip.rank,
                     sip.mention_count
@@ -199,16 +230,19 @@ def briefing_today():
 
     stocks_out = [
         {
-            "rank":               r.get("rank"),
-            "symbol":             r["symbol"],
-            "sentiment":          r["sentiment"],
-            "setup_type":         r["setup_type"],
-            "thesis":             r["thesis"],
-            "score":              r["score"],
-            "prior_session_gap_pct": r["gap_pct"],     # DB column is gap_pct; field renamed
-            "move_source":        r["gap_source"],  # DB column is gap_source; field renamed
-            "mention_count":      r.get("mention_count") or 0,
-            "signals":            r["signals"] or {},
+            "rank":                  r.get("rank"),
+            "symbol":                r["symbol"],
+            "sentiment":             r["sentiment"],
+            "setup_type":            r["setup_type"],
+            "thesis":                r["thesis"],
+            "catalyst_line":         r.get("catalyst_line"),   # new
+            "direction":             r.get("direction"),        # new
+            "score":                 r["score"],
+            "gap_pct":               r["gap_pct"],   # field the frontend reads
+            "prior_session_gap_pct": r["gap_pct"],   # kept for API compat
+            "move_source":           r["gap_source"],
+            "mention_count":         r.get("mention_count") or 0,
+            "signals":               r["signals"] or {},
         }
         for r in stocks_rows
     ]

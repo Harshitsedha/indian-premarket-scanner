@@ -91,8 +91,9 @@ def _build_message(
         stock_move = float(sig.get("prior_session_gap_pct", 0.0))
         move_src   = str(sig.get("move_source", "historical_gap"))
         stk_score  = float(s.get("score", 0.0))
+        catalyst = html.escape(str(s.get("catalyst_line") or thesis))
         lines.append(f"{rank}. <b>{symbol}</b> — {_emoji(sent)} {html.escape(sent)} · {setup}")
-        lines.append(f"   <i>{thesis}</i>")
+        lines.append(f"   <i>{catalyst}</i>")
         lines.append(f"   <i>score={stk_score:.2f} · move={stock_move:+.1f}% ({move_src})</i>")
 
     return "\n".join(lines)
