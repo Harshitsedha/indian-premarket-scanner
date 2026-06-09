@@ -246,7 +246,7 @@ function MarkdownReport({ md }: { md: string }) {
 
 // ── Job list row ──────────────────────────────────────────────────────────────
 
-function JobRow({ job }: { job: Job }) {
+function JobRow({ job, onDelete }: { job: Job; onDelete: (id: string) => void }) {
   const [expanded, setExpanded]     = useState(false);
   const [ruleset, setRuleset]       = useState<Ruleset | null>(null);
   const [reportState, setReportState] = useState<"idle" | "loading" | "done" | "error">("idle");
@@ -256,6 +256,7 @@ function JobRow({ job }: { job: Job }) {
   // Optimistic cancel state — overrides job.status locally until the 2s poll catches up.
   // Cleared automatically once the parent's status moves to a terminal state.
   const [localStatus, setLocalStatus] = useState<Job["status"] | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const displayStatus = localStatus ?? job.status;
 
   useEffect(() => {
@@ -326,6 +327,33 @@ function JobRow({ job }: { job: Job }) {
   }
 
   const canCancel = displayStatus === "queued" || displayStatus === "running";
+  const canDelete = job.status === "done" || job.status === "error" || job.status === "cancelled";
+
+  async function handleDelete(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (!window.confirm("Delete this job and its result CSV? This cannot be undone.")) return;
+    setDeleteError(null);
+    try {
+      const res = await fetch(`/api/backtest/jobs/${job.id}`, { method: "DELETE" });
+      if (res.status === 404) {
+        onDelete(job.id);
+        return;
+      }
+      if (res.status === 409) {
+        const body = await res.json().catch(() => ({})) as { detail?: string };
+        setDeleteError(body.detail ?? "Cancel the job before deleting.");
+        return;
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as { detail?: string };
+        setDeleteError(body.detail ?? `HTTP ${res.status}`);
+        return;
+      }
+      onDelete(job.id);
+    } catch {
+      setDeleteError("Network error — try again.");
+    }
+  }
 
   return (
     <div style={{ borderBottom: "1px solid var(--border)" }}>
@@ -461,6 +489,24 @@ function JobRow({ job }: { job: Job }) {
           <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "monospace", marginTop: 4 }}>
             id: {job.id}
           </div>
+          {canDelete && (
+            <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 10 }}>
+              <button
+                type="button"
+                onClick={handleDelete}
+                style={{
+                  fontSize: 11, padding: "2px 10px", borderRadius: 6, cursor: "pointer",
+                  border: "1px solid rgba(224,82,82,0.4)",
+                  backgroundColor: "rgba(224,82,82,0.08)", color: "var(--bearish)",
+                }}
+              >
+                Delete
+              </button>
+              {deleteError && (
+                <span style={{ fontSize: 11, color: "var(--bearish)" }}>{deleteError}</span>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -1602,7 +1648,13 @@ export default function BacktestPage() {
               <span>Status</span><span>Mode</span><span>Symbol</span>
               <span>Range</span><span>Time</span><span></span>
             </div>
-            {jobs.map((j) => <JobRow key={j.id} job={j} />)}
+            {jobs.map((j) => (
+              <JobRow
+                key={j.id}
+                job={j}
+                onDelete={(id) => setJobs((prev) => prev.filter((x) => x.id !== id))}
+              />
+            ))}
           </div>
         )}
       </div>

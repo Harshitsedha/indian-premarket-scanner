@@ -15,6 +15,7 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 from fastapi import FastAPI, HTTPException, Query
+from loguru import logger
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -27,6 +28,7 @@ from utils.config import settings
 from processing.edge_stats import build_stats, query_rows
 from processing.tagging_universe import TAGGING_UNIVERSE_SET
 from backtest.features import FEATURES, parse_features
+from backtest.recorder import _RESULTS_DIR
 
 app = FastAPI(title="PreMarket Pro API", version="1.0.0")
 
@@ -630,6 +632,94 @@ def cancel_job(req: _CancelRequest):
     if not row:
         raise HTTPException(404, "Job not found")
     raise HTTPException(409, f"Job already in state '{row[0]}'")
+
+
+# ── DELETE /api/backtest/jobs/{job_id} ────────────────────────────────────────
+
+# Statuses where a worker is actively executing — deletion is unsafe.
+_ACTIVE_STATUSES = frozenset({"queued", "running", "cancelling"})
+
+# Path-safety checks reused from retention (same constraints).
+_PROTECTED_PREFIXES = ("candidates_", "ca_report_")
+
+
+@app.delete("/api/backtest/jobs/{job_id}")
+def delete_job(job_id: str):
+    """
+    Permanently delete a job row and its result CSV.
+
+    Only allowed when status is terminal (done, error, cancelled).
+    Returns 409 for active jobs (queued/running/cancelling) — cancel first.
+
+    FK ordering (within one transaction):
+      1. DELETE backtest_rulesets WHERE job_id = %s   (clears the FK)
+      2. DELETE backtest_jobs     WHERE id      = %s
+      COMMIT
+      3. unlink result file (best-effort — DB is already consistent)
+
+    An orphaned file on disk (DB deleted, unlink failed) is harmless disk waste.
+    A dangling DB pointer (file deleted, DB not updated) would cause 404 downloads.
+    We always prefer the harmless failure mode.
+    """
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, result_path FROM backtest_jobs WHERE id = %s",
+                (job_id,),
+            )
+            row = cur.fetchone()
+
+        if not row:
+            raise HTTPException(404, "Job not found")
+
+        status, result_path = row
+
+        if status in _ACTIVE_STATUSES:
+            raise HTTPException(
+                409,
+                f"Job is active (status='{status}') — cancel it before deleting",
+            )
+
+        # Validate and resolve the file path BEFORE the transaction so we can
+        # log it and detect safety issues without touching the DB.
+        safe_path: Path | None = None
+        if result_path:
+            results_dir = _RESULTS_DIR.resolve()
+            candidate = Path(result_path).resolve()
+            if (
+                results_dir in candidate.parents
+                and candidate.suffix == ".csv"
+                and not candidate.name.startswith(_PROTECTED_PREFIXES)
+            ):
+                safe_path = candidate
+            else:
+                logger.warning(
+                    f"delete_job {job_id[:8]}: result_path {result_path!r} failed "
+                    f"safety checks — DB rows will be deleted but file skipped"
+                )
+
+        # Transaction: rulesets first (FK), then job row, then commit.
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM backtest_rulesets WHERE job_id = %s", (job_id,))
+            cur.execute("DELETE FROM backtest_jobs     WHERE id      = %s", (job_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    # File unlink is after commit — best-effort; DB is already clean.
+    if safe_path is not None:
+        logger.info(f"delete_job {job_id[:8]}: unlinking {safe_path.name}")
+        try:
+            if safe_path.exists():
+                safe_path.unlink()
+        except Exception as exc:
+            logger.warning(
+                f"delete_job {job_id[:8]}: file unlink failed ({exc}) — "
+                f"harmless orphaned disk"
+            )
+
+    return {"deleted": True}
 
 
 # ── GET /api/backtest/jobs ────────────────────────────────────────────────────
