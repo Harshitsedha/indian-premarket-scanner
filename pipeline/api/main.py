@@ -573,6 +573,65 @@ def create_job(req: CreateJobRequest):
     return {"job_id": str(row[0]), "status": "queued", "created_at": row[1].isoformat()}
 
 
+# ── POST /api/backtest/cancel ─────────────────────────────────────────────────
+
+class _CancelRequest(BaseModel):
+    job_id: str
+
+
+@app.post("/api/backtest/cancel")
+def cancel_job(req: _CancelRequest):
+    """
+    Cancel a queued or running job.
+
+    Two atomic conditional UPDATEs — no read-then-write TOCTOU race:
+      queued  → cancelled  (immediate; finished_at set now)
+      running → cancelling (signals the worker's poll thread)
+
+    If neither matches (job is already in a terminal state), returns 409.
+    The worker's poll thread sees 'cancelling' within 2s and raises _JobCancelled,
+    which transitions the job to 'cancelled' with finished_at set.
+    """
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            # Attempt 1: claim the queued→cancelled slot atomically
+            cur.execute(
+                "UPDATE backtest_jobs"
+                "   SET status = 'cancelled', finished_at = NOW()"
+                " WHERE id = %s AND status = 'queued'",
+                (req.job_id,),
+            )
+            if cur.rowcount:
+                conn.commit()
+                return {"status": "cancelled"}
+
+            # Attempt 2: signal the running worker → cancelling atomically
+            cur.execute(
+                "UPDATE backtest_jobs"
+                "   SET status = 'cancelling'"
+                " WHERE id = %s AND status = 'running'",
+                (req.job_id,),
+            )
+            if cur.rowcount:
+                conn.commit()
+                return {"status": "cancelling"}
+
+            # Job is in a terminal or unknown state — fetch for 409 body
+            cur.execute(
+                "SELECT status FROM backtest_jobs WHERE id = %s",
+                (req.job_id,),
+            )
+            row = cur.fetchone()
+            conn.rollback()
+    finally:
+        conn.close()
+
+    if not row:
+        raise HTTPException(404, "Job not found")
+    raise HTTPException(409, f"Job already in state '{row[0]}'")
+
+
 # ── GET /api/backtest/jobs ────────────────────────────────────────────────────
 
 @app.get("/api/backtest/jobs")

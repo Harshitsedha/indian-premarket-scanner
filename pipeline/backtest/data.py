@@ -28,6 +28,7 @@ if str(_PIPELINE) not in sys.path:
     sys.path.insert(0, str(_PIPELINE))
 
 from ingestion.upstox_client import _get_bearer_token  # reuse DB-backed auth
+from backtest.exceptions import _JobCancelled
 
 _BASE_V3    = "https://api.upstox.com/v3"
 _CACHE_DIR  = Path(__file__).parent / "cache"
@@ -139,6 +140,7 @@ def get_candles(
     start: date,
     end: date,
     symbol: str = "",
+    cancel_event=None,          # threading.Event | None; omit outside worker context
 ) -> pd.DataFrame:
     """
     Return a chronologically-sorted DataFrame of candles.
@@ -180,6 +182,10 @@ def get_candles(
 
     with httpx.Client(headers=headers, timeout=30) as http:
         while chunk_end >= start:
+            if cancel_event is not None and cancel_event.is_set():
+                raise _JobCancelled(
+                    f"candle fetch cancelled ({symbol or instrument_key})"
+                )
             chunk_start = max(start, chunk_end - timedelta(days=_CHUNK_DAYS))
             logger.info(
                 f"Fetching {symbol or instrument_key} {unit}/{n}: "

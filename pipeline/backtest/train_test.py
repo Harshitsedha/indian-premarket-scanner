@@ -47,6 +47,7 @@ from backtest.metrics import compute_summary as compute_trade_summary
 from backtest.recorder import _RESULTS_DIR, write_csv
 from backtest.loader import load_strategy
 from backtest.data import get_candles, scan_ca_jumps
+from backtest.exceptions import _JobCancelled
 from ingestion.upstox_instruments import get_instrument_token
 
 
@@ -144,6 +145,7 @@ def run_train_test(
     ca_ack:          bool        = True,
     strategy_params: dict | None = None,
     db_conn          = None,     # injected in tests; None → open own connection
+    cancel_event     = None,     # threading.Event | None; omit outside worker context
 ) -> tuple[str, dict]:
     """
     Execute a train→test run. Returns (result_path_str, summary_dict).
@@ -213,12 +215,17 @@ def run_train_test(
         filtered_trades: list[ClosedTrade] = []
 
         for symbol in symbols:
+            if cancel_event is not None and cancel_event.is_set():
+                raise _JobCancelled(f"run_train_test cancelled during Step C at {symbol}")
             ik = get_instrument_token(symbol)
             if not ik:
                 logger.warning(f"Symbol not found in instrument master: {symbol}")
                 continue
             try:
-                candles = get_candles(ik, interval, start_d, end_d, symbol=symbol)
+                candles = get_candles(ik, interval, start_d, end_d, symbol=symbol,
+                                      cancel_event=cancel_event)
+            except _JobCancelled:
+                raise
             except Exception as exc:
                 logger.error(f"Candle fetch error {symbol}: {exc}")
                 continue

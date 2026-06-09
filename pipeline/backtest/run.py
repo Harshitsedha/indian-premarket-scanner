@@ -45,6 +45,7 @@ from loguru import logger
 from utils.logger import setup_logger
 
 from backtest.data import get_candles, scan_ca_jumps
+from backtest.exceptions import _JobCancelled
 from backtest.engine import run as engine_run
 from backtest.features import parse_features
 from backtest.metrics import compute_summary, print_summary, write_summary
@@ -360,6 +361,7 @@ def run_single(
     strict_ca:       bool  = False,
     features:        str | None  = None,
     strategy_params: dict | None = None,
+    cancel_event     = None,      # threading.Event | None; omit outside worker context
 ) -> tuple[str, dict]:
     """
     Execute a single-symbol backtest (features=None) or record run (features set).
@@ -385,7 +387,10 @@ def run_single(
     if not instrument_key:
         raise ValueError(f"Symbol not found in instrument master: {symbol}")
 
-    candles = get_candles(instrument_key, interval, start_d, end_d, symbol=symbol)
+    candles = get_candles(instrument_key, interval, start_d, end_d, symbol=symbol,
+                          cancel_event=cancel_event)
+    if cancel_event is not None and cancel_event.is_set():
+        raise _JobCancelled(f"run_single cancelled after candle fetch for {symbol}")
     if candles.empty:
         raise RuntimeError(f"No candles returned for {symbol} {start_d}–{end_d}")
 
@@ -433,6 +438,7 @@ def run_multi(
     ca_ack:          bool  = True,
     features:        str | None  = None,
     strategy_params: dict | None = None,
+    cancel_event     = None,      # threading.Event | None; omit outside worker context
 ) -> tuple[str, dict]:
     """
     Execute a multi-symbol backtest or record run over the full SCAN_WATCHLIST.
@@ -462,11 +468,16 @@ def run_multi(
     ca_flagged_symbols: set[str]   = set()
 
     for symbol in SCAN_WATCHLIST:
+        if cancel_event is not None and cancel_event.is_set():
+            raise _JobCancelled(f"run_multi cancelled during CA sweep at {symbol}")
         instrument_key = get_instrument_token(symbol)
         if not instrument_key:
             continue
         try:
-            candles = get_candles(instrument_key, interval, start_d, end_d, symbol=symbol)
+            candles = get_candles(instrument_key, interval, start_d, end_d, symbol=symbol,
+                                  cancel_event=cancel_event)
+        except _JobCancelled:
+            raise
         except Exception:
             continue
         if candles.empty:
@@ -500,11 +511,16 @@ def run_multi(
     all_candidates: list = []
 
     for symbol in universe:
+        if cancel_event is not None and cancel_event.is_set():
+            raise _JobCancelled(f"run_multi cancelled during backtest loop at {symbol}")
         instrument_key = get_instrument_token(symbol)
         if not instrument_key:
             continue
         try:
-            candles = get_candles(instrument_key, interval, start_d, end_d, symbol=symbol)
+            candles = get_candles(instrument_key, interval, start_d, end_d, symbol=symbol,
+                                  cancel_event=cancel_event)
+        except _JobCancelled:
+            raise
         except Exception:
             continue
         if candles.empty:
@@ -518,6 +534,8 @@ def run_multi(
             else:
                 trades = engine_run(candles, strat, symbol)
             all_trades.extend(trades)
+        except _JobCancelled:
+            raise
         except Exception as exc:
             logger.error(f"Engine error {symbol}: {exc}")
 

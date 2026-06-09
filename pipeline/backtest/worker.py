@@ -9,7 +9,11 @@ Guarantees:
     but one is enough given typical job durations (seconds to minutes on cache).
   - A crash inside a job sets status=error with full traceback; the loop continues.
   - DB errors in the poll loop are logged and retried after the poll interval.
-  - On startup, jobs stuck in 'running' for >10 min are marked error (not re-queued).
+  - On startup, jobs stuck in 'running' or 'cancelling' for >10 min are marked error
+    (not re-queued, to break the systemd Restart=on-failure infinite cycle).
+  - Per-job signal.alarm(600s) hard timeout raises _JobTimeout.
+  - Per-job background thread polls DB every 2s for 'cancelling'; when detected it
+    sets cancel_event which execution functions check at safe checkpoints.
 """
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ import argparse
 import json
 import signal
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -31,6 +36,7 @@ from loguru import logger
 
 from utils.config import settings
 from utils.logger import setup_logger
+from backtest.exceptions import _JobCancelled
 from backtest.run import run_single, run_multi
 
 # Hard limit per job. SIGALRM is UNIX-only; this worker runs on a Linux VPS.
@@ -57,27 +63,29 @@ def _db():
 
 def _reset_orphaned(conn) -> None:
     """
-    Mark jobs still in 'running' when the worker restarts as error.
+    Mark jobs stuck in 'running' or 'cancelling' when the worker restarts as error.
 
-    Re-queuing would cause an infinite cycle when combined with systemd
-    Restart=on-failure: crash → restart → re-queue → crash → ...
-    Marking as error breaks the cycle; the user can resubmit manually.
+    'running' orphans:    worker crashed mid-execution.
+    'cancelling' orphans: worker crashed after the cancel signal was set but before
+                          the job acknowledged it and reached a terminal state.
+
+    Re-queuing would cause an infinite cycle with systemd Restart=on-failure.
     """
     with conn.cursor() as cur:
         cur.execute("""
             UPDATE backtest_jobs
-               SET status     = 'error',
+               SET status      = 'error',
                    finished_at = NOW(),
                    error       = 'Job was still running when the worker restarted '
                                  '(likely timed out or the worker process was killed). '
                                  'Resubmit to retry.'
-             WHERE status = 'running'
+             WHERE status IN ('running', 'cancelling')
                AND started_at < NOW() - INTERVAL '10 minutes'
         """)
         count = cur.rowcount
         conn.commit()
     if count:
-        logger.warning(f"Marked {count} orphaned running job(s) as error (not re-queued).")
+        logger.warning(f"Marked {count} orphaned job(s) as error (not re-queued).")
 
 
 def _claim(conn) -> dict | None:
@@ -127,23 +135,75 @@ def _set_error(conn, job_id: str, error: str) -> None:
         conn.commit()
 
 
-def _execute(job: dict) -> tuple[str, dict]:
+def _set_cancelled(conn, job_id: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE backtest_jobs
+               SET status = 'cancelled', finished_at = NOW()
+             WHERE id = %s
+            """,
+            (job_id,),
+        )
+        conn.commit()
+
+
+def _poll_cancel(
+    job_id: str,
+    cancel_event: threading.Event,
+    stop_event: threading.Event,
+) -> None:
+    """
+    Background thread: polls DB every 2s for this specific job's status turning
+    'cancelling'. Opens its own short-lived connection per poll — never shares the
+    main loop's connection or sits inside a long-lived transaction, so it sees the
+    cancel endpoint's committed write on the very next poll cycle.
+
+    Scoped strictly to job_id: a lingering thread (if join times out) cannot
+    react to a different job's status because the WHERE clause is job-id-specific.
+    """
+    while not stop_event.is_set():
+        try:
+            conn = _db()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT status FROM backtest_jobs WHERE id = %s",
+                        (job_id,),
+                    )
+                    row = cur.fetchone()
+            finally:
+                conn.close()
+            if row and row[0] == "cancelling":
+                cancel_event.set()
+                return
+        except Exception as exc:
+            logger.debug(f"[{job_id[:8]}] poll-cancel DB error (non-fatal): {exc}")
+        # stop_event.wait acts like sleep but wakes immediately on stop_event.set()
+        stop_event.wait(timeout=2.0)
+
+
+def _execute(job: dict, cancel_event: threading.Event) -> tuple[str, dict]:
     """Dispatch to run_single, run_multi, or run_train_test based on params."""
     params = dict(job["params"])   # psycopg2 returns jsonb as dict already
     mode   = job["mode"]
 
     if mode == "train_test":
         from backtest.train_test import run_train_test
-        return run_train_test(job_id=str(job["id"]), **params)
+        return run_train_test(
+            job_id=str(job["id"]),
+            cancel_event=cancel_event,
+            **params,
+        )
 
     # 'features' in params → record run; absent → backtest run
     if mode == "record" and "features" not in params:
         raise ValueError("record mode job missing 'features' in params")
 
     if "symbol" in params:
-        return run_single(**params)
+        return run_single(cancel_event=cancel_event, **params)
     else:
-        return run_multi(**params)
+        return run_multi(cancel_event=cancel_event, **params)
 
 
 def main() -> None:
@@ -173,13 +233,30 @@ def main() -> None:
                 if job:
                     jid = str(job["id"])
                     logger.info(f"[{jid[:8]}] Claimed {job['mode']} job, params={job['params']}")
+
+                    # Per-job cancel polling thread — own connection, job-id scoped
+                    cancel_event = threading.Event()
+                    stop_poll    = threading.Event()
+                    poll_thread  = threading.Thread(
+                        target=_poll_cancel,
+                        args=(jid, cancel_event, stop_poll),
+                        daemon=True,
+                        name=f"cancel-poll-{jid[:8]}",
+                    )
+                    poll_thread.start()
+
                     signal.signal(signal.SIGALRM, _alarm_handler)
                     signal.alarm(_MAX_JOB_SECONDS)
                     try:
-                        result_path, summary = _execute(job)
+                        result_path, summary = _execute(job, cancel_event)
                         signal.alarm(0)
                         _set_done(conn, jid, result_path, summary)
                         logger.info(f"[{jid[:8]}] Done -> {result_path}")
+                    except _JobCancelled as exc:
+                        # Most specific first — must precede bare Exception
+                        signal.alarm(0)
+                        logger.info(f"[{jid[:8]}] Cancelled: {exc}")
+                        _set_cancelled(conn, jid)
                     except _JobTimeout as exc:
                         signal.alarm(0)
                         msg = str(exc)
@@ -190,6 +267,14 @@ def main() -> None:
                         tb = traceback.format_exc()
                         logger.error(f"[{jid[:8]}] Failed:\n{tb}")
                         _set_error(conn, jid, tb)
+                    finally:
+                        # Always tear down the poll thread, even if the job errored.
+                        # stop_event.set() wakes the wait(2.0) immediately; join(3)
+                        # gives it time to exit cleanly. A daemon thread that outlives
+                        # the join cannot affect later jobs — its WHERE clause is
+                        # scoped to jid.
+                        stop_poll.set()
+                        poll_thread.join(timeout=3)
             finally:
                 conn.close()
         except Exception as exc:

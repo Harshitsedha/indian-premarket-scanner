@@ -11,7 +11,7 @@ type Job = {
   id: string;
   mode: "run" | "record" | "train_test";
   params: Record<string, unknown>;
-  status: "queued" | "running" | "done" | "error";
+  status: "queued" | "running" | "done" | "error" | "cancelling" | "cancelled";
   summary: Record<string, unknown> | null;
   error: string | null;
   created_at: string;
@@ -79,10 +79,12 @@ function dateRange(params: Record<string, unknown>): string {
 
 function StatusPill({ status }: { status: Job["status"] }) {
   const map: Record<string, { bg: string; color: string }> = {
-    queued:  { bg: "rgba(107,104,128,0.15)", color: "var(--muted)"    },
-    running: { bg: "rgba(124,111,224,0.15)", color: "var(--accent)"   },
-    done:    { bg: "rgba(29,158,117,0.15)",  color: "var(--bullish)"  },
-    error:   { bg: "rgba(224,82,82,0.15)",   color: "var(--bearish)"  },
+    queued:     { bg: "rgba(107,104,128,0.15)", color: "var(--muted)"      },
+    running:    { bg: "rgba(124,111,224,0.15)", color: "var(--accent)"     },
+    done:       { bg: "rgba(29,158,117,0.15)",  color: "var(--bullish)"    },
+    error:      { bg: "rgba(224,82,82,0.15)",   color: "var(--bearish)"    },
+    cancelling: { bg: "rgba(224,150,50,0.15)",  color: "rgb(200,140,50)"   },
+    cancelled:  { bg: "rgba(107,104,128,0.12)", color: "var(--muted)"      },
   };
   const s = map[status] ?? map.queued;
   return (
@@ -251,6 +253,17 @@ function JobRow({ job }: { job: Job }) {
   const [reportMd, setReportMd]     = useState("");
   const [reportError, setReportError] = useState("");
 
+  // Optimistic cancel state — overrides job.status locally until the 2s poll catches up.
+  // Cleared automatically once the parent's status moves to a terminal state.
+  const [localStatus, setLocalStatus] = useState<Job["status"] | null>(null);
+  const displayStatus = localStatus ?? job.status;
+
+  useEffect(() => {
+    if (job.status !== "queued" && job.status !== "running") {
+      setLocalStatus(null);
+    }
+  }, [job.status]);
+
   // Fetch ruleset on expand if this is a done train_test job
   useEffect(() => {
     if (expanded && job.mode === "train_test" && job.status === "done" && !ruleset) {
@@ -289,6 +302,31 @@ function JobRow({ job }: { job: Job }) {
     }
   }
 
+  async function handleCancel(e: React.MouseEvent) {
+    e.stopPropagation();
+    setLocalStatus("cancelling");
+    try {
+      const res = await fetch("/api/backtest/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: job.id }),
+      });
+      if (res.status === 409) {
+        // Job already finished — clear the optimistic state; parent poll will refresh.
+        setLocalStatus(null);
+        return;
+      }
+      if (!res.ok) {
+        setLocalStatus(null);
+      }
+      // 200 cancelling/cancelled → keep showing cancelling until parent poll updates.
+    } catch {
+      setLocalStatus(null);
+    }
+  }
+
+  const canCancel = displayStatus === "queued" || displayStatus === "running";
+
   return (
     <div style={{ borderBottom: "1px solid var(--border)" }}>
       <button
@@ -302,7 +340,7 @@ function JobRow({ job }: { job: Job }) {
           cursor: "pointer", color: "var(--text)", fontSize: 13, alignItems: "center",
         }}
       >
-        <StatusPill status={job.status} />
+        <StatusPill status={displayStatus} />
         <span style={{ color: "var(--accent)", fontSize: 12 }}>{job.mode}</span>
         <span style={{ fontFamily: "monospace", fontSize: 12 }}>{paramLabel(job.params)}</span>
         <span style={{ color: "var(--muted)", fontSize: 12 }}>{dateRange(job.params)}</span>
@@ -320,6 +358,17 @@ function JobRow({ job }: { job: Job }) {
           >
             CSV
           </a>
+        ) : canCancel ? (
+          <span
+            onClick={handleCancel}
+            style={{
+              fontSize: 11, padding: "2px 8px", borderRadius: 6, cursor: "pointer",
+              backgroundColor: "rgba(224,82,82,0.12)", color: "var(--bearish)",
+              textAlign: "center", userSelect: "none",
+            }}
+          >
+            Cancel
+          </span>
         ) : <span />}
       </button>
 
@@ -335,9 +384,16 @@ function JobRow({ job }: { job: Job }) {
               {job.error?.slice(0, 800)}
             </pre>
           )}
-          {(job.status === "queued" || job.status === "running") && (
+          {job.status === "cancelled" && (
+            <p style={{ fontSize: 12, color: "var(--muted)", margin: 0, fontStyle: "italic" }}>
+              Cancelled.
+            </p>
+          )}
+          {(displayStatus === "queued" || displayStatus === "running" || displayStatus === "cancelling") && (
             <p style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>
-              {job.status === "running"
+              {displayStatus === "cancelling"
+                ? "Cancelling…"
+                : displayStatus === "running"
                 ? "Running… started at " + fmtTime(job.started_at)
                 : "Waiting in queue"}
             </p>
