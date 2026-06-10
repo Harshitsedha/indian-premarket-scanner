@@ -3,6 +3,7 @@ APScheduler-based scheduler for the PreMarket Pro pipeline.
 
 Jobs (IST):
   08:45 Mon-Fri  morning_briefing          — full pipeline: scrape, analyse, save, notify, healthcheck
+  15:35 Mon-Fri  orb_eod                   — persist ORB range outcomes, clean Redis
   15:45 Mon-Fri  outcome_fetcher           — EOD outcome fetch (10:15 UTC)
   16:00 Fri      edge_analyser             — weekly edge pattern analysis (10:30 UTC Fri)
   05:00 Mon      instrument_master_refresh — NSE instrument master weekly refresh (23:30 UTC Sun)
@@ -35,6 +36,7 @@ from ingestion.upstox_token_refresh import check_extended_token_expiry
 from ingestion.upstox_instruments import refresh_instrument_master
 from processing.outcome_fetcher import fetch_and_log_outcomes
 from processing.edge_analyser import run_edge_analysis
+from processing.orb_eod import run_orb_eod
 
 
 # ── failure alert ─────────────────────────────────────────────────────────────
@@ -102,6 +104,17 @@ async def edge_analyser_job() -> None:
         await _send_failure_alert(exc)
 
 
+async def orb_eod_job() -> None:
+    logger.info("Job [orb_eod] starting")
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, run_orb_eod)
+        logger.info("Job [orb_eod] done")
+    except Exception as exc:
+        logger.error(f"Job [orb_eod] FAILED: {exc}")
+        await _send_failure_alert(exc)
+
+
 async def instrument_master_refresh_job() -> None:
     logger.info("Job [instrument_master_refresh] starting")
     try:
@@ -126,6 +139,16 @@ async def main() -> None:
         misfire_grace_time=300,
         coalesce=True,
         max_instances=1,
+    )
+    scheduler.add_job(
+        orb_eod_job,
+        CronTrigger(hour=15, minute=35, day_of_week="mon-fri", timezone="Asia/Kolkata"),
+        id="orb_eod",
+        name="ORB range EOD persistence",
+        misfire_grace_time=600,
+        coalesce=True,
+        max_instances=1,
+        replace_existing=True,
     )
     scheduler.add_job(
         outcome_fetcher_job,

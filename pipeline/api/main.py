@@ -179,7 +179,181 @@ def radar():
         "stale":       stale,
         "market_open": market_open,
         "status":      status,
+        "ranges":      _load_active_ranges(),
     }
+
+
+# ── OR range definitions ──────────────────────────────────────────────────────
+
+from datetime import time as _dtime
+
+from realtime.orb_ranges import (
+    MAX_ACTIVE_RANGES,
+    SESSION_END as _OR_SESSION_END,
+    SESSION_START as _OR_SESSION_START,
+    default_or_end,
+    range_label,
+)
+
+
+def _load_active_ranges() -> list[dict]:
+    """Active range defs for today (standard + today's session). [] on DB error."""
+    default_end = default_or_end()
+    try:
+        conn = _db()
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, name, or_start, or_end, scope, session_date
+                FROM   orb_range_defs
+                WHERE  active = TRUE
+                  AND  (scope = 'standard' OR (scope = 'session' AND session_date = %s))
+                ORDER BY or_start, or_end
+                """,
+                (date.today(),),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+    except Exception as exc:
+        logger.warning(f"radar ranges load failed: {exc}")
+        return []
+
+    out = []
+    for r in rows:
+        out.append({
+            "id":           r["id"],
+            "name":         r["name"],
+            "or_start":     r["or_start"].strftime("%H:%M"),
+            "or_end":       r["or_end"].strftime("%H:%M"),
+            "scope":        r["scope"],
+            "session_date": r["session_date"].isoformat() if r["session_date"] else None,
+            "label":        range_label(r["or_start"], r["or_end"]),
+            "is_default":   (
+                r["scope"] == "standard"
+                and r["or_start"] == _OR_SESSION_START
+                and r["or_end"] == default_end
+            ),
+        })
+    return out
+
+
+class CreateRangeRequest(BaseModel):
+    name:     str
+    or_start: str   # "HH:MM"
+    or_end:   str   # "HH:MM"
+    scope:    str   # "session" | "standard"
+
+
+def _parse_hm(value: str, field: str) -> _dtime:
+    try:
+        parts = value.split(":")
+        return _dtime(int(parts[0]), int(parts[1]))
+    except (ValueError, IndexError) as exc:
+        raise HTTPException(422, f"Invalid {field} {value!r} — expected HH:MM") from exc
+
+
+@app.get("/api/radar/ranges")
+def list_radar_ranges():
+    return _load_active_ranges()
+
+
+@app.post("/api/radar/ranges", status_code=201)
+def create_radar_range(req: CreateRangeRequest):
+    if not req.name.strip():
+        raise HTTPException(422, "name must not be empty")
+    if req.scope not in ("session", "standard"):
+        raise HTTPException(422, f"scope must be 'session' or 'standard', got {req.scope!r}")
+
+    or_start = _parse_hm(req.or_start, "or_start")
+    or_end   = _parse_hm(req.or_end, "or_end")
+    if or_start < _OR_SESSION_START:
+        raise HTTPException(422, f"or_start must be >= {_OR_SESSION_START:%H:%M}")
+    if or_end > _OR_SESSION_END:
+        raise HTTPException(422, f"or_end must be <= {_OR_SESSION_END:%H:%M}")
+    if or_end <= or_start:
+        raise HTTPException(422, "or_end must be after or_start")
+
+    if len(_load_active_ranges()) >= MAX_ACTIVE_RANGES:
+        raise HTTPException(
+            422, f"Max {MAX_ACTIVE_RANGES} active ranges per day (poller cost control)"
+        )
+
+    session_date = date.today() if req.scope == "session" else None
+
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id FROM orb_range_defs
+                WHERE  or_start = %s AND or_end = %s AND scope = %s
+                  AND  session_date IS NOT DISTINCT FROM %s
+                """,
+                (or_start, or_end, req.scope, session_date),
+            )
+            existing = cur.fetchone()
+            if existing:
+                # Re-activate a previously soft-deleted identical def instead of 409ing
+                cur.execute(
+                    """
+                    UPDATE orb_range_defs SET active = TRUE, name = %s
+                    WHERE id = %s AND active = FALSE
+                    """,
+                    (req.name.strip(), existing[0]),
+                )
+                if cur.rowcount == 0:
+                    conn.rollback()
+                    raise HTTPException(409, "An identical active range already exists")
+                conn.commit()
+                return {"id": existing[0], "reactivated": True}
+
+            cur.execute(
+                """
+                INSERT INTO orb_range_defs (name, or_start, or_end, scope, session_date)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (req.name.strip(), or_start, or_end, req.scope, session_date),
+            )
+            new_id = cur.fetchone()[0]
+            conn.commit()
+    finally:
+        conn.close()
+    return {"id": new_id, "reactivated": False}
+
+
+@app.delete("/api/radar/ranges/{range_id}")
+def delete_radar_range(range_id: int):
+    """Soft delete (active=false). The default OR window is protected."""
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT or_start, or_end, scope FROM orb_range_defs WHERE id = %s",
+                (range_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "Range not found")
+            or_start, or_end, scope = row
+            if (
+                scope == "standard"
+                and or_start == _OR_SESSION_START
+                and or_end == default_or_end()
+            ):
+                raise HTTPException(403, "The default OR range cannot be deleted")
+
+            cur.execute(
+                "UPDATE orb_range_defs SET active = FALSE WHERE id = %s AND active = TRUE",
+                (range_id,),
+            )
+            if cur.rowcount == 0:
+                conn.rollback()
+                raise HTTPException(409, "Range is already inactive")
+            conn.commit()
+    finally:
+        conn.close()
+    return {"deleted": range_id}
 
 
 # ── GET /api/briefing/today ───────────────────────────────────────────────────

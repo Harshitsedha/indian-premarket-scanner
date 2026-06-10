@@ -20,7 +20,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from realtime.radar_poller import (
-    _compute_or_status,
     _compute_row,
     _poll_cycle,
     _session_fraction,
@@ -28,6 +27,58 @@ from realtime.radar_poller import (
     _STATUS_KEY,
     IST,
 )
+from realtime.orb_ranges import RangeTracker, builtin_default_def, compute_break_status
+
+
+class FakeCache:
+    """In-memory stand-in for storage.redis_client (kv + list + hash keyspaces)."""
+
+    def __init__(self):
+        self.kv:     dict = {}
+        self.lists:  dict = {}
+        self.hashes: dict = {}
+
+    def get(self, key):
+        return self.kv.get(key)
+
+    def set_ex(self, key, value, ttl=60):
+        self.kv[key] = value
+
+    def setnx_ex(self, key, ttl):
+        if key in self.kv:
+            return False
+        self.kv[key] = 1
+        return True
+
+    def rpush_json_many(self, items, ttl):
+        for k, v in items.items():
+            self.lists.setdefault(k, []).append(v)
+
+    def lrange_json(self, key):
+        return list(self.lists.get(key, []))
+
+    def hset_json(self, key, mapping, ttl=None):
+        self.hashes.setdefault(key, {}).update(mapping)
+
+    def hgetall_json(self, key):
+        return dict(self.hashes.get(key, {}))
+
+    def delete_pattern(self, pattern):
+        import fnmatch
+        n = 0
+        for store in (self.kv, self.lists, self.hashes):
+            for k in [k for k in store if fnmatch.fnmatch(k, pattern)]:
+                del store[k]
+                n += 1
+        return n
+
+
+def _make_tracker(fake_cache, trade_date="2026-06-10", defs=None):
+    """RangeTracker wired to a FakeCache (defaults to the built-in default range)."""
+    with patch("realtime.orb_ranges._cache", fake_cache):
+        tracker = RangeTracker(trade_date)
+        tracker.set_defs(defs if defs is not None else [builtin_default_def()])
+    return tracker
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -176,14 +227,16 @@ class TestPollCycle:
 
     def _call(self, http, baselines, quote_data, mock_cache, written):
         """Helper: call _poll_cycle with the full new signature."""
+        fake = FakeCache()
         with patch("realtime.radar_poller._get_full_quotes", return_value=quote_data), \
              patch("realtime.radar_poller._cache", mock_cache), \
+             patch("realtime.orb_ranges._cache", fake), \
              patch("realtime.radar_poller._session_fraction", return_value=0.5), \
              patch("realtime.radar_poller.process_alerts"):
             mock_cache.set_ex.side_effect = lambda k, v, ttl: written.update({k: v})
             return _poll_cycle(
                 http, self._universe(), baselines,
-                or_state={}, trade_date="2026-06-10",
+                tracker=_make_tracker(fake), trade_date="2026-06-10",
                 news_cache={}, alert_rules=[],
             )
 
@@ -225,13 +278,15 @@ class TestPollCycle:
         mock_cache = MagicMock()
         written    = {}
 
+        fake = FakeCache()
         with patch("realtime.radar_poller._get_full_quotes", return_value={"_401": True}), \
              patch("realtime.radar_poller._cache", mock_cache), \
+             patch("realtime.orb_ranges._cache", fake), \
              patch("realtime.radar_poller._send_token_alert") as mock_alert:
             mock_cache.set_ex.side_effect = lambda k, v, ttl: written.update({k: v})
             result = _poll_cycle(
                 http, self._universe(), {},
-                or_state={}, trade_date="2026-06-10",
+                tracker=_make_tracker(fake), trade_date="2026-06-10",
                 news_cache={}, alert_rules=[],
             )
 
@@ -246,11 +301,13 @@ class TestPollCycle:
         http       = MagicMock()
         mock_cache = MagicMock()
 
+        fake = FakeCache()
         with patch("realtime.radar_poller._get_full_quotes", return_value=None), \
-             patch("realtime.radar_poller._cache", mock_cache):
+             patch("realtime.radar_poller._cache", mock_cache), \
+             patch("realtime.orb_ranges._cache", fake):
             result = _poll_cycle(
                 http, self._universe(), {},
-                or_state={}, trade_date="2026-06-10",
+                tracker=_make_tracker(fake), trade_date="2026-06-10",
                 news_cache={}, alert_rules=[],
             )
 
@@ -270,7 +327,8 @@ class TestRadarApiEndpoint:
         from api.main import radar as radar_endpoint
 
         old_snapshot = self._make_snapshot(200)
-        with patch("api.main._cache") as mock_cache:
+        with patch("api.main._cache") as mock_cache, \
+             patch("api.main._load_active_ranges", return_value=[]):
             mock_cache.get.side_effect = lambda k: old_snapshot if k == "radar:snapshot" else {}
             result = radar_endpoint()
         assert result["stale"] is True
@@ -280,7 +338,8 @@ class TestRadarApiEndpoint:
         from api.main import radar as radar_endpoint
 
         fresh_snapshot = self._make_snapshot(30)
-        with patch("api.main._cache") as mock_cache:
+        with patch("api.main._cache") as mock_cache, \
+             patch("api.main._load_active_ranges", return_value=[]):
             mock_cache.get.side_effect = lambda k: fresh_snapshot if k == "radar:snapshot" else {}
             result = radar_endpoint()
         assert result["stale"] is False
@@ -289,7 +348,8 @@ class TestRadarApiEndpoint:
         """No snapshot in Redis → snapshot=None, stale=False."""
         from api.main import radar as radar_endpoint
 
-        with patch("api.main._cache") as mock_cache:
+        with patch("api.main._cache") as mock_cache, \
+             patch("api.main._load_active_ranges", return_value=[]):
             mock_cache.get.return_value = None
             result = radar_endpoint()
         assert result["snapshot"] is None
@@ -302,6 +362,7 @@ class TestRadarApiEndpoint:
         # 11:00 IST = 05:30 UTC on a Tuesday
         tuesday_1100_ist = datetime(2026, 6, 9, 5, 30, 0, tzinfo=timezone.utc)
         with patch("api.main._cache") as mock_cache, \
+             patch("api.main._load_active_ranges", return_value=[]), \
              patch("api.main.datetime") as mock_dt:
             mock_cache.get.return_value = None
             mock_dt.now.return_value = tuesday_1100_ist
@@ -315,6 +376,7 @@ class TestRadarApiEndpoint:
 
         saturday_1100_ist = datetime(2026, 6, 6, 5, 30, 0, tzinfo=timezone.utc)
         with patch("api.main._cache") as mock_cache, \
+             patch("api.main._load_active_ranges", return_value=[]), \
              patch("api.main.datetime") as mock_dt:
             mock_cache.get.return_value = None
             mock_dt.now.return_value = saturday_1100_ist
@@ -432,127 +494,118 @@ class TestBaselinesIdempotency:
 
 # ── Opening Range tracking ────────────────────────────────────────────────────
 
+def _tracker_row(symbol="RELIANCE", ltp=None, high=None, low=None,
+                 prev_close=2900.0, rvol=None, volume=0):
+    return {"symbol": symbol, "ltp": ltp, "high": high, "low": low,
+            "prev_close": prev_close, "rvol": rvol, "volume": volume}
+
+
 class TestORTracking:
-    """Tests for _compute_or_status: freeze, latch, and break logic."""
+    """Freeze, latch, and break logic via the orb_ranges range framework."""
 
     def _now_ist(self, h: int, m: int, s: int = 0):
         return datetime(2026, 6, 10, h, m, s, tzinfo=IST)
 
-    def _baseline_vals(self):
-        return {"avg_range_pct_20d": 0.02}  # 2% ATR
+    BASELINES = {"RELIANCE": {"avg_range_pct_20d": 0.02}}
+
+    def _frozen_tracker(self, fake, or_high=2960.0, or_low=2910.0):
+        """Tracker with the default range pre-materialised for RELIANCE."""
+        tracker = _make_tracker(fake)
+        label   = builtin_default_def()["label"]
+        tracker.ranges[label]["materialized"] = {
+            "RELIANCE": {"or_high": or_high, "or_low": or_low,
+                         "frozen_at": self._now_ist(9, 30).isoformat()},
+        }
+        return tracker, label
 
     # -- freeze boundary --
 
     def test_forming_before_window_end(self):
-        """Before 09:30 and no prior freeze → status is 'forming'."""
-        from realtime.radar_poller import _compute_or_status
-
-        or_state = {}
-        _, _, status, _ = _compute_or_status(
-            "RELIANCE", 2950.0, 2960.0, 2910.0, 2900.0, 0.02,
-            self._now_ist(9, 20), or_state,
-        )
-        assert status == "forming"
-        assert "RELIANCE" not in or_state   # not yet frozen
+        """Before 09:30 → status is 'forming', nothing materialised."""
+        fake    = FakeCache()
+        tracker = _make_tracker(fake)
+        rows    = [_tracker_row(ltp=2950.0, high=2960.0, low=2910.0)]
+        with patch("realtime.orb_ranges._cache", fake):
+            tracker.update(rows, self.BASELINES, self._now_ist(9, 20))
+        assert rows[0]["or_status"] == "forming"
+        assert rows[0]["or_high"] is None
+        label = builtin_default_def()["label"]
+        assert tracker.ranges[label]["materialized"] is None
 
     def test_freezes_at_window_end(self):
-        """At exactly 09:30, symbol gets frozen using current session high/low."""
-        from realtime.radar_poller import _compute_or_status
+        """First update at/after 09:30 freezes from poll history high/low."""
+        fake    = FakeCache()
+        tracker = _make_tracker(fake)
+        with patch("realtime.orb_ranges._cache", fake):
+            # Polls during the window: high/low grow to 2960/2910
+            for hh, mm, hi, lo in [(9, 16, 2940.0, 2920.0), (9, 22, 2955.0, 2912.0),
+                                   (9, 29, 2960.0, 2910.0)]:
+                rows = [_tracker_row(ltp=2930.0, high=hi, low=lo)]
+                now  = self._now_ist(hh, mm)
+                tracker.append_poll_history(rows, now)
+                tracker.update(rows, self.BASELINES, now)
+            assert rows[0]["or_status"] == "forming"
 
-        or_state = {}
-        or_h, or_l, status, _ = _compute_or_status(
-            "RELIANCE", 2930.0, 2960.0, 2910.0, 2900.0, 0.02,
-            self._now_ist(9, 30), or_state,
-        )
-        assert or_h == pytest.approx(2960.0)
-        assert or_l == pytest.approx(2910.0)
-        assert status == "inside"
-        assert "RELIANCE" in or_state
-        assert or_state["RELIANCE"]["frozen_at"] is not None
+            # First poll past 09:30 → frozen at the window's history h/l
+            rows = [_tracker_row(ltp=2930.0, high=2970.0, low=2905.0)]
+            now  = self._now_ist(9, 31)
+            tracker.append_poll_history(rows, now)
+            tracker.update(rows, self.BASELINES, now)
+
+        assert rows[0]["or_high"] == pytest.approx(2960.0)
+        assert rows[0]["or_low"]  == pytest.approx(2910.0)
+        assert rows[0]["or_status"] == "inside"
+        label = builtin_default_def()["label"]
+        assert tracker.ranges[label]["materialized"]["RELIANCE"]["frozen_at"] is not None
 
     def test_no_update_after_freeze(self):
-        """Once frozen, subsequent calls do not change or_high/or_low even if H/L changes."""
-        from realtime.radar_poller import _compute_or_status
+        """Once frozen, expanding session H/L never changes the OR bounds."""
+        fake = FakeCache()
+        tracker, label = self._frozen_tracker(fake)
+        rows = [_tracker_row(ltp=2935.0, high=2980.0, low=2900.0)]
+        with patch("realtime.orb_ranges._cache", fake):
+            tracker.update(rows, self.BASELINES, self._now_ist(10, 0))
+        assert rows[0]["or_high"] == pytest.approx(2960.0)
+        assert rows[0]["or_low"]  == pytest.approx(2910.0)
 
-        or_state = {}
-        # First call at 09:30 — freeze with H=2960, L=2910
-        _compute_or_status(
-            "RELIANCE", 2930.0, 2960.0, 2910.0, 2900.0, 0.02,
-            self._now_ist(9, 30), or_state,
-        )
-        # Second call at 10:00 — H/L have expanded to 2980/2900 (session highs grow)
-        or_h, or_l, _, _ = _compute_or_status(
-            "RELIANCE", 2935.0, 2980.0, 2900.0, 2900.0, 0.02,
-            self._now_ist(10, 0), or_state,
-        )
-        # OR values must remain at their frozen values
-        assert or_h == pytest.approx(2960.0)
-        assert or_l == pytest.approx(2910.0)
-
-    # -- break logic --
+    # -- break logic (compute_break_status is the single shared latch path) --
 
     def test_status_broke_up(self):
-        """LTP above or_high → 'broke_up'."""
-        from realtime.radar_poller import _compute_or_status
-
-        or_state = {}
-        _compute_or_status("INFY", 1500.0, 1510.0, 1480.0, 1490.0, 0.02,
-                            self._now_ist(9, 30), or_state)
-        _, _, status, break_atr = _compute_or_status(
-            "INFY", 1515.0, 1520.0, 1480.0, 1490.0, 0.02,
-            self._now_ist(10, 0), or_state,
-        )
+        status, break_atr = compute_break_status(
+            "inside", 1515.0, 1510.0, 1480.0, 1490.0, 0.02)
         assert status == "broke_up"
         assert break_atr is not None and break_atr > 0
 
     def test_status_broke_down(self):
-        """LTP below or_low → 'broke_down'."""
-        from realtime.radar_poller import _compute_or_status
-
-        or_state = {}
-        _compute_or_status("TCS", 3500.0, 3510.0, 3480.0, 3490.0, 0.02,
-                            self._now_ist(9, 30), or_state)
-        _, _, status, _ = _compute_or_status(
-            "TCS", 3475.0, 3510.0, 3470.0, 3490.0, 0.02,
-            self._now_ist(10, 0), or_state,
-        )
+        status, _ = compute_break_status(
+            "inside", 3475.0, 3510.0, 3480.0, 3490.0, 0.02)
         assert status == "broke_down"
 
     def test_latch_no_revert_to_inside(self):
-        """Once 'broke_up', LTP retreating inside OR should NOT revert to 'inside'."""
-        from realtime.radar_poller import _compute_or_status
-
-        or_state = {}
-        _compute_or_status("HDFC", 1800.0, 1810.0, 1780.0, 1790.0, 0.02,
-                            self._now_ist(9, 30), or_state)
-        # Break up
-        _compute_or_status("HDFC", 1815.0, 1815.0, 1780.0, 1790.0, 0.02,
-                            self._now_ist(10, 0), or_state)
-        assert or_state["HDFC"]["or_status"] == "broke_up"
-        # LTP retreats inside range
-        _, _, status, _ = _compute_or_status(
-            "HDFC", 1795.0, 1815.0, 1780.0, 1790.0, 0.02,
-            self._now_ist(10, 15), or_state,
-        )
-        assert status == "broke_up"   # latched — does not flip to "inside"
+        """Once 'broke_up', LTP retreating inside OR does NOT revert to 'inside'."""
+        status, _ = compute_break_status(
+            "broke_up", 1795.0, 1810.0, 1780.0, 1790.0, 0.02)
+        assert status == "broke_up"
 
     def test_double_sided_break(self):
         """'broke_up' followed by LTP below or_low → updates to 'broke_down'."""
-        from realtime.radar_poller import _compute_or_status
-
-        or_state = {}
-        _compute_or_status("WIPRO", 500.0, 510.0, 490.0, 495.0, 0.02,
-                            self._now_ist(9, 30), or_state)
-        # Breaks up
-        _compute_or_status("WIPRO", 512.0, 515.0, 490.0, 495.0, 0.02,
-                            self._now_ist(10, 0), or_state)
-        assert or_state["WIPRO"]["or_status"] == "broke_up"
-        # Then breaks down on the opposite side
-        _, _, status, _ = _compute_or_status(
-            "WIPRO", 488.0, 515.0, 488.0, 495.0, 0.02,
-            self._now_ist(10, 30), or_state,
-        )
+        status, _ = compute_break_status(
+            "broke_up", 488.0, 510.0, 490.0, 495.0, 0.02)
         assert status == "broke_down"
+
+    def test_tracker_latch_through_cycles(self):
+        """End-to-end latch across update() cycles on the default range."""
+        fake = FakeCache()
+        tracker, label = self._frozen_tracker(fake)
+        with patch("realtime.orb_ranges._cache", fake):
+            rows = [_tracker_row(ltp=2970.0, high=2975.0, low=2910.0, rvol=2.4)]
+            tracker.update(rows, self.BASELINES, self._now_ist(10, 0))
+            assert rows[0]["or_status"] == "broke_up"
+            # Retreat inside the range — latched
+            rows = [_tracker_row(ltp=2940.0, high=2975.0, low=2910.0, rvol=2.0)]
+            tracker.update(rows, self.BASELINES, self._now_ist(10, 5))
+            assert rows[0]["or_status"] == "broke_up"
+            assert rows[0]["ranges"][label]["status"] == "broke_up"
 
 
 # ── Alert rule evaluation ─────────────────────────────────────────────────────
@@ -672,14 +725,16 @@ class TestNewsJoin:
         baselines = {"RELIANCE": _baseline(prev_close=2900.0, avg_vol=2_000_000)}
         written   = {}
 
+        fake = FakeCache()
         with patch("realtime.radar_poller._get_full_quotes", return_value=self._quote_data()), \
              patch("realtime.radar_poller._cache") as mock_cache, \
+             patch("realtime.orb_ranges._cache", fake), \
              patch("realtime.radar_poller._session_fraction", return_value=0.5), \
              patch("realtime.radar_poller.process_alerts"):
             mock_cache.set_ex.side_effect = lambda k, v, ttl: written.update({k: v})
             result = _poll_cycle(
                 http, self._universe(), baselines,
-                or_state={}, trade_date="2026-06-10",
+                tracker=_make_tracker(fake), trade_date="2026-06-10",
                 news_cache={}, alert_rules=[],
             )
 
@@ -697,14 +752,16 @@ class TestNewsJoin:
         written   = {}
         news      = {"RELIANCE": {"catalyst_line": "Q4 beat; Jio strong", "headline_count": 3}}
 
+        fake = FakeCache()
         with patch("realtime.radar_poller._get_full_quotes", return_value=self._quote_data()), \
              patch("realtime.radar_poller._cache") as mock_cache, \
+             patch("realtime.orb_ranges._cache", fake), \
              patch("realtime.radar_poller._session_fraction", return_value=0.5), \
              patch("realtime.radar_poller.process_alerts"):
             mock_cache.set_ex.side_effect = lambda k, v, ttl: written.update({k: v})
             _poll_cycle(
                 http, self._universe(), baselines,
-                or_state={}, trade_date="2026-06-10",
+                tracker=_make_tracker(fake), trade_date="2026-06-10",
                 news_cache=news, alert_rules=[],
             )
 

@@ -48,6 +48,84 @@ def set_ex(key: str, value: Any, ttl: int = 60) -> None:
         logger.debug(f"Redis set({key!r}, ttl={ttl}) failed: {exc}")
 
 
+def rpush_json_many(items: dict[str, Any], ttl: int) -> None:
+    """
+    RPUSH one JSON-serialised value per key (pipelined), setting the TTL on the
+    first push only (list length 1 after push). Silent on error.
+    """
+    if _CLIENT is None or not items:
+        return
+    try:
+        keys = list(items.keys())
+        pipe = _CLIENT.pipeline(transaction=False)
+        for k in keys:
+            pipe.rpush(k, json.dumps(items[k]))
+        lengths = pipe.execute()
+        new_keys = [k for k, length in zip(keys, lengths) if length == 1]
+        if new_keys:
+            pipe = _CLIENT.pipeline(transaction=False)
+            for k in new_keys:
+                pipe.expire(k, ttl)
+            pipe.execute()
+    except Exception as exc:
+        logger.debug(f"Redis rpush_json_many ({len(items)} keys) failed: {exc}")
+
+
+def lrange_json(key: str) -> list:
+    """Return the full list at key with each item JSON-decoded. [] on miss/error."""
+    if _CLIENT is None:
+        return []
+    try:
+        raw = _CLIENT.lrange(key, 0, -1)
+        return [json.loads(item) for item in raw]
+    except Exception as exc:
+        logger.debug(f"Redis lrange_json({key!r}) failed: {exc}")
+        return []
+
+
+def hset_json(key: str, mapping: dict[str, Any], ttl: int | None = None) -> None:
+    """HSET each field to its JSON-serialised value; optionally refresh the TTL."""
+    if _CLIENT is None or not mapping:
+        return
+    try:
+        _CLIENT.hset(key, mapping={f: json.dumps(v) for f, v in mapping.items()})
+        if ttl is not None:
+            _CLIENT.expire(key, ttl)
+    except Exception as exc:
+        logger.debug(f"Redis hset_json({key!r}) failed: {exc}")
+
+
+def hgetall_json(key: str) -> dict[str, Any]:
+    """Return the full hash at key with each value JSON-decoded. {} on miss/error."""
+    if _CLIENT is None:
+        return {}
+    try:
+        return {f: json.loads(v) for f, v in _CLIENT.hgetall(key).items()}
+    except Exception as exc:
+        logger.debug(f"Redis hgetall_json({key!r}) failed: {exc}")
+        return {}
+
+
+def delete_pattern(pattern: str) -> int:
+    """Delete all keys matching a glob pattern via SCAN. Returns count deleted."""
+    if _CLIENT is None:
+        return 0
+    try:
+        deleted = 0
+        batch: list[str] = []
+        for k in _CLIENT.scan_iter(match=pattern, count=500):
+            batch.append(k)
+            if len(batch) >= 500:
+                deleted += _CLIENT.delete(*batch)
+                batch = []
+        if batch:
+            deleted += _CLIENT.delete(*batch)
+        return deleted
+    except Exception as exc:
+        logger.debug(f"Redis delete_pattern({pattern!r}) failed: {exc}")
+        return 0
+
+
 def setnx_ex(key: str, ttl: int) -> bool:
     """
     Set key with TTL only if it does not already exist.

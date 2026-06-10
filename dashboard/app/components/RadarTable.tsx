@@ -7,6 +7,19 @@ import { useSearchParams } from "next/navigation";
 
 type ORStatus = "forming" | "inside" | "broke_up" | "broke_down" | null;
 
+type RangeCell = { status: ORStatus; break_atr: number | null };
+
+export type RangeDef = {
+  id: number;
+  name: string;
+  or_start: string;   // "HH:MM"
+  or_end: string;     // "HH:MM"
+  scope: "session" | "standard";
+  session_date: string | null;
+  label: string;      // "HH:MM-HH:MM" — key into row.ranges
+  is_default: boolean;
+};
+
 type RadarRow = {
   symbol: string;
   ltp: number | null;
@@ -27,6 +40,8 @@ type RadarRow = {
   or_low: number | null;
   or_status: ORStatus;
   or_break_atr: number | null;
+  // Custom OR ranges: label -> {status, break_atr}
+  ranges?: Record<string, RangeCell>;
   // D: News / catalyst
   has_news: boolean;
   catalyst_line: string | null;
@@ -43,6 +58,7 @@ export type RadarResponse = {
   stale: boolean;
   market_open: boolean;
   status: { state?: string };
+  ranges?: RangeDef[];
 };
 
 // ── column config ─────────────────────────────────────────────────────────────
@@ -247,14 +263,26 @@ export function RadarTable({ initial }: { initial: RadarResponse }) {
   const [sortKey, setSortKey] = useState<SortKey>(SORT_DEFAULT);
   const [sortAsc, setSortAsc] = useState(false);   // RVOL default: descending
   const [filters, setFilters] = useState<FilterState>(() => filtersFromParams(searchParams));
+  const [selRange, setSelRange] = useState<string>(() => searchParams.get("orRange") ?? "");
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Persist filters to URL
+  // Add-range form state
+  const [showAdd,  setShowAdd]  = useState(false);
+  const [addName,  setAddName]  = useState("");
+  const [addStart, setAddStart] = useState("10:00");
+  const [addEnd,   setAddEnd]   = useState("10:45");
+  const [addScope, setAddScope] = useState<"session" | "standard">("session");
+  const [addErr,   setAddErr]   = useState<string | null>(null);
+  const [addBusy,  setAddBusy]  = useState(false);
+
+  // Persist filters + selected range to URL
   useEffect(() => {
-    const qs  = filtersToQS(filters);
+    const p = new URLSearchParams(filtersToQS(filters));
+    if (selRange) p.set("orRange", selRange);
+    const qs  = p.toString();
     const url = qs ? `?${qs}` : window.location.pathname;
     window.history.replaceState(null, "", url);
-  }, [filters]);
+  }, [filters, selRange]);
 
   // 45-second polling, paused when tab is hidden
   const fetchData = useCallback(async () => {
@@ -283,8 +311,73 @@ export function RadarTable({ initial }: { initial: RadarResponse }) {
   const setF = (patch: Partial<FilterState>) => setFilters(f => ({ ...f, ...patch }));
   const hasFilters = Object.values(filters).some(v => v !== "");
 
-  const allRows  = data.snapshot?.rows ?? [];
+  // ── OR range selection ──
+  // The OR column (and orStatus filter) reflects the selected range. The default
+  // range uses the row-level or_* fields; custom ranges read row.ranges[label].
+  const rangeDefs    = data.ranges ?? [];
+  const defaultLabel = rangeDefs.find(r => r.is_default)?.label ?? "";
+  const activeLabel  = selRange || defaultLabel;
+  const activeDef    = rangeDefs.find(r => r.label === activeLabel);
+  const useCustom    = activeLabel !== "" && activeLabel !== defaultLabel;
+
+  const rawRows = data.snapshot?.rows ?? [];
+  const allRows = useCustom
+    ? rawRows.map(r => {
+        const cell = r.ranges?.[activeLabel];
+        return {
+          ...r,
+          or_status:    cell?.status ?? null,
+          or_break_atr: cell?.break_atr ?? null,
+          or_high:      null,
+          or_low:       null,
+        };
+      })
+    : rawRows;
   const filtered = applySort(applyFilters(allRows, filters), sortKey, sortAsc);
+
+  async function refreshRanges() {
+    await fetchData();   // /api/radar carries the active range list
+  }
+
+  async function submitAddRange() {
+    setAddErr(null);
+    if (!addName.trim()) { setAddErr("Name is required"); return; }
+    setAddBusy(true);
+    try {
+      const res = await fetch("/api/radar/ranges", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: addName.trim(), or_start: addStart, or_end: addEnd, scope: addScope,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setAddErr(typeof body.detail === "string" ? body.detail : `Failed (HTTP ${res.status})`);
+        return;
+      }
+      setShowAdd(false);
+      setAddName("");
+      setSelRange(`${addStart}-${addEnd}`);
+      await refreshRanges();
+    } catch {
+      setAddErr("Network error");
+    } finally {
+      setAddBusy(false);
+    }
+  }
+
+  async function deleteRange(def: RangeDef) {
+    if (def.is_default) return;
+    if (!window.confirm(`Delete range "${def.name}" (${def.label})?`)) return;
+    try {
+      const res = await fetch(`/api/radar/ranges/${def.id}`, { method: "DELETE" });
+      if (res.ok) {
+        if (selRange === def.label) setSelRange("");
+        await refreshRanges();
+      }
+    } catch { /* leave list as-is */ }
+  }
 
   const asOf = (() => {
     if (!data.snapshot?.generated_at) return null;
@@ -389,6 +482,117 @@ export function RadarTable({ initial }: { initial: RadarResponse }) {
           ))}
         </div>
       </div>
+
+      {/* ── OR range selector ── */}
+      {rangeDefs.length > 0 && (
+        <div style={{
+          background: "var(--surface)", border: "1px solid var(--border)",
+          borderRadius: 10, padding: "10px 16px",
+          display: "flex", flexDirection: "column", gap: 10,
+        }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--muted)" }}>
+              OR Range
+              <select
+                value={activeLabel}
+                onChange={e => setSelRange(e.target.value === defaultLabel ? "" : e.target.value)}
+                style={{
+                  padding: "3px 6px", background: "var(--bg)",
+                  border: "1px solid var(--border)", borderRadius: 6,
+                  color: "var(--text)", fontSize: 12, outline: "none",
+                }}
+              >
+                {rangeDefs.map(r => (
+                  <option key={r.id} value={r.label}>
+                    {r.label} — {r.name}{r.scope === "session" ? " (today)" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {activeDef && !activeDef.is_default && (
+              <button
+                onClick={() => deleteRange(activeDef)}
+                title={`Delete range ${activeDef.label}`}
+                style={{
+                  padding: "4px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer",
+                  border: "1px solid var(--bearish)", color: "var(--bearish)", background: "transparent",
+                }}
+              >✕ Delete</button>
+            )}
+
+            <button
+              onClick={() => { setShowAdd(s => !s); setAddErr(null); }}
+              style={{
+                padding: "4px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer",
+                border: "1px solid var(--accent)", color: "var(--accent)", background: "transparent",
+              }}
+            >{showAdd ? "Cancel" : "+ Add range"}</button>
+          </div>
+
+          {showAdd && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+              <input
+                type="text"
+                placeholder="Name (e.g. Mid-morning)"
+                value={addName}
+                onChange={e => setAddName(e.target.value)}
+                style={{
+                  width: 180, padding: "3px 6px", background: "var(--bg)",
+                  border: "1px solid var(--border)", borderRadius: 6,
+                  color: "var(--text)", fontSize: 12, outline: "none",
+                }}
+              />
+              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--muted)" }}>
+                Start
+                <input
+                  type="time" value={addStart} min="09:15" max="15:30"
+                  onChange={e => setAddStart(e.target.value)}
+                  style={{
+                    padding: "3px 6px", background: "var(--bg)",
+                    border: "1px solid var(--border)", borderRadius: 6,
+                    color: "var(--text)", fontSize: 12, outline: "none",
+                  }}
+                />
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--muted)" }}>
+                End
+                <input
+                  type="time" value={addEnd} min="09:15" max="15:30"
+                  onChange={e => setAddEnd(e.target.value)}
+                  style={{
+                    padding: "3px 6px", background: "var(--bg)",
+                    border: "1px solid var(--border)", borderRadius: 6,
+                    color: "var(--text)", fontSize: 12, outline: "none",
+                  }}
+                />
+              </label>
+              {(["session", "standard"] as const).map(s => (
+                <button
+                  key={s}
+                  onClick={() => setAddScope(s)}
+                  style={{
+                    padding: "4px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer",
+                    border: `1px solid ${addScope === s ? "var(--accent)" : "var(--border)"}`,
+                    color: addScope === s ? "var(--accent)" : "var(--muted)",
+                    background: "transparent",
+                  }}
+                >{s === "session" ? "This session only" : "Standard (every day)"}</button>
+              ))}
+              <button
+                onClick={submitAddRange}
+                disabled={addBusy}
+                style={{
+                  padding: "4px 12px", borderRadius: 6, fontSize: 11,
+                  cursor: addBusy ? "wait" : "pointer",
+                  border: "1px solid var(--bullish)", color: "var(--bullish)", background: "transparent",
+                }}
+              >{addBusy ? "Saving…" : "Save"}</button>
+              {addErr && <span style={{ fontSize: 11, color: "var(--bearish)" }}>{addErr}</span>}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── row count ── */}
       <div style={{ color: "var(--muted)", fontSize: 12 }}>
