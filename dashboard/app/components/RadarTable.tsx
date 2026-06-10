@@ -284,11 +284,33 @@ export function RadarTable({ initial }: { initial: RadarResponse }) {
     window.history.replaceState(null, "", url);
   }, [filters, selRange]);
 
+  // Range defs are managed independently of the snapshot so the range controls
+  // work when the market is closed / no snapshot exists (e.g. defining ranges
+  // before open). Seeded from the initial response, refreshed from
+  // /api/radar/ranges (DB-backed, Redis-independent) and from each poll.
+  const [rangeDefs, setRangeDefs] = useState<RangeDef[]>(initial.ranges ?? []);
+
+  const fetchRanges = useCallback(async () => {
+    try {
+      const res = await fetch("/api/radar/ranges", { cache: "no-store" });
+      if (res.ok) {
+        const body = await res.json();
+        if (Array.isArray(body)) setRangeDefs(body);
+      }
+    } catch { /* keep last list */ }
+  }, []);
+
+  useEffect(() => { fetchRanges(); }, [fetchRanges]);
+
   // 45-second polling, paused when tab is hidden
   const fetchData = useCallback(async () => {
     try {
       const res = await fetch("/api/radar", { cache: "no-store" });
-      if (res.ok) setData(await res.json());
+      if (res.ok) {
+        const body: RadarResponse = await res.json();
+        setData(body);
+        if (Array.isArray(body.ranges) && body.ranges.length > 0) setRangeDefs(body.ranges);
+      }
     } catch { /* silent — show last data */ }
   }, []);
 
@@ -314,7 +336,6 @@ export function RadarTable({ initial }: { initial: RadarResponse }) {
   // ── OR range selection ──
   // The OR column (and orStatus filter) reflects the selected range. The default
   // range uses the row-level or_* fields; custom ranges read row.ranges[label].
-  const rangeDefs    = data.ranges ?? [];
   const defaultLabel = rangeDefs.find(r => r.is_default)?.label ?? "";
   const activeLabel  = selRange || defaultLabel;
   const activeDef    = rangeDefs.find(r => r.label === activeLabel);
@@ -336,7 +357,7 @@ export function RadarTable({ initial }: { initial: RadarResponse }) {
   const filtered = applySort(applyFilters(allRows, filters), sortKey, sortAsc);
 
   async function refreshRanges() {
-    await fetchData();   // /api/radar carries the active range list
+    await fetchRanges();
   }
 
   async function submitAddRange() {
@@ -483,13 +504,13 @@ export function RadarTable({ initial }: { initial: RadarResponse }) {
         </div>
       </div>
 
-      {/* ── OR range selector ── */}
-      {rangeDefs.length > 0 && (
-        <div style={{
-          background: "var(--surface)", border: "1px solid var(--border)",
-          borderRadius: 10, padding: "10px 16px",
-          display: "flex", flexDirection: "column", gap: 10,
-        }}>
+      {/* ── OR range selector — always rendered so ranges can be managed
+             before market open / without snapshot data ── */}
+      <div style={{
+        background: "var(--surface)", border: "1px solid var(--border)",
+        borderRadius: 10, padding: "10px 16px",
+        display: "flex", flexDirection: "column", gap: 10,
+      }}>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
             <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--muted)" }}>
               OR Range
@@ -502,6 +523,9 @@ export function RadarTable({ initial }: { initial: RadarResponse }) {
                   color: "var(--text)", fontSize: 12, outline: "none",
                 }}
               >
+                {rangeDefs.length === 0 && (
+                  <option value="">No ranges loaded</option>
+                )}
                 {rangeDefs.map(r => (
                   <option key={r.id} value={r.label}>
                     {r.label} — {r.name}{r.scope === "session" ? " (today)" : ""}
@@ -591,8 +615,7 @@ export function RadarTable({ initial }: { initial: RadarResponse }) {
               {addErr && <span style={{ fontSize: 11, color: "var(--bearish)" }}>{addErr}</span>}
             </div>
           )}
-        </div>
-      )}
+      </div>
 
       {/* ── row count ── */}
       <div style={{ color: "var(--muted)", fontSize: 12 }}>
