@@ -23,7 +23,9 @@ jobs:
             OLD_HEAD=$(git rev-parse HEAD)
             git checkout -- .
             git clean -fd
-            git pull origin main
+            git config pull.ff only
+            git fetch origin main
+            git reset --hard origin/main
             CHANGED=$(git diff --name-only "$OLD_HEAD" HEAD)
             echo "Changed files since $OLD_HEAD:"
             echo "${CHANGED:-  (none — already up to date)}"
