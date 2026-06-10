@@ -46,3 +46,19 @@ def set_ex(key: str, value: Any, ttl: int = 60) -> None:
         _CLIENT.setex(key, ttl, json.dumps(value))
     except Exception as exc:
         logger.debug(f"Redis set({key!r}, ttl={ttl}) failed: {exc}")
+
+
+def setnx_ex(key: str, ttl: int) -> bool:
+    """
+    Set key with TTL only if it does not already exist.
+    Returns True if the key was newly set (first caller wins), False if it already existed.
+    On Redis unavailability or error, returns True so alerts are not silently suppressed.
+    """
+    if _CLIENT is None:
+        return True   # no Redis → cannot dedup; allow fire
+    try:
+        result = _CLIENT.set(key, 1, ex=ttl, nx=True)
+        return result is not None   # None → key already existed
+    except Exception as exc:
+        logger.debug(f"Redis setnx_ex({key!r}) failed: {exc}")
+        return True   # on error, allow alert to fire

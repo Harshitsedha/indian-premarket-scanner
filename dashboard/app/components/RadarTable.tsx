@@ -5,6 +5,8 @@ import { useSearchParams } from "next/navigation";
 
 // ── types ─────────────────────────────────────────────────────────────────────
 
+type ORStatus = "forming" | "inside" | "broke_up" | "broke_down" | null;
+
 type RadarRow = {
   symbol: string;
   ltp: number | null;
@@ -20,6 +22,15 @@ type RadarRow = {
   range_used_pct: number | null;
   atr_multiple: number | null;
   index_membership: string;
+  // B: Opening Range
+  or_high: number | null;
+  or_low: number | null;
+  or_status: ORStatus;
+  or_break_atr: number | null;
+  // D: News / catalyst
+  has_news: boolean;
+  catalyst_line: string | null;
+  headline_count: number;
 };
 
 type RadarSnapshot = {
@@ -46,6 +57,7 @@ const COLUMNS: { key: SortKey; label: string; align: "left" | "right" }[] = [
   { key: "change_from_open_pct", label: "From Open%", align: "right" },
   { key: "rvol",                 label: "RVOL",       align: "right" },
   { key: "atr_multiple",         label: "ATR×",       align: "right" },
+  { key: "or_status",            label: "OR Status",  align: "left"  },
   { key: "volume",               label: "Volume",     align: "right" },
 ];
 
@@ -56,40 +68,49 @@ type FilterState = {
   rvolMin: string;
   chgMin: string; chgMax: string;
   atrMin: string;
+  orStatus: string;   // "" | "forming" | "inside" | "broke_up" | "broke_down"
+  newsOnly: string;   // "" | "1"
 };
 
 const EMPTY_FILTERS: FilterState = {
   gapMin: "", gapMax: "", rvolMin: "",
   chgMin: "", chgMax: "", atrMin: "",
+  orStatus: "", newsOnly: "",
 };
 
 type PresetDef = { label: string; apply: (s: FilterState) => FilterState };
 const PRESETS: PresetDef[] = [
-  { label: "Gap Up >2%",           apply: s => ({ ...s, gapMin: "2",   gapMax: ""    }) },
-  { label: "Gap Down <-2%",        apply: s => ({ ...s, gapMin: "",    gapMax: "-2"  }) },
+  { label: "Gap Up >2%",            apply: s => ({ ...s, gapMin: "2",   gapMax: ""    }) },
+  { label: "Gap Down <-2%",         apply: s => ({ ...s, gapMin: "",    gapMax: "-2"  }) },
   { label: "Volume Surge (RVOL>2)", apply: s => ({ ...s, rvolMin: "2"               }) },
   { label: "Range Expansion (ATR>1.5)", apply: s => ({ ...s, atrMin: "1.5"          }) },
+  { label: "ORB Break Up",          apply: s => ({ ...s, orStatus: "broke_up"       }) },
+  { label: "ORB Break Down",        apply: s => ({ ...s, orStatus: "broke_down"     }) },
 ];
 
 function filtersFromParams(sp: URLSearchParams): FilterState {
   return {
-    gapMin:  sp.get("gapMin")  ?? "",
-    gapMax:  sp.get("gapMax")  ?? "",
-    rvolMin: sp.get("rvolMin") ?? "",
-    chgMin:  sp.get("chgMin")  ?? "",
-    chgMax:  sp.get("chgMax")  ?? "",
-    atrMin:  sp.get("atrMin")  ?? "",
+    gapMin:   sp.get("gapMin")   ?? "",
+    gapMax:   sp.get("gapMax")   ?? "",
+    rvolMin:  sp.get("rvolMin")  ?? "",
+    chgMin:   sp.get("chgMin")   ?? "",
+    chgMax:   sp.get("chgMax")   ?? "",
+    atrMin:   sp.get("atrMin")   ?? "",
+    orStatus: sp.get("orStatus") ?? "",
+    newsOnly: sp.get("newsOnly") ?? "",
   };
 }
 
 function filtersToQS(f: FilterState): string {
   const p = new URLSearchParams();
-  if (f.gapMin)  p.set("gapMin",  f.gapMin);
-  if (f.gapMax)  p.set("gapMax",  f.gapMax);
-  if (f.rvolMin) p.set("rvolMin", f.rvolMin);
-  if (f.chgMin)  p.set("chgMin",  f.chgMin);
-  if (f.chgMax)  p.set("chgMax",  f.chgMax);
-  if (f.atrMin)  p.set("atrMin",  f.atrMin);
+  if (f.gapMin)   p.set("gapMin",   f.gapMin);
+  if (f.gapMax)   p.set("gapMax",   f.gapMax);
+  if (f.rvolMin)  p.set("rvolMin",  f.rvolMin);
+  if (f.chgMin)   p.set("chgMin",   f.chgMin);
+  if (f.chgMax)   p.set("chgMax",   f.chgMax);
+  if (f.atrMin)   p.set("atrMin",   f.atrMin);
+  if (f.orStatus) p.set("orStatus", f.orStatus);
+  if (f.newsOnly) p.set("newsOnly", f.newsOnly);
   return p.toString();
 }
 
@@ -115,18 +136,21 @@ function applyFilters(rows: RadarRow[], f: FilterState): RadarRow[] {
     if (chgMin  !== null && (r.change_pct   === null || r.change_pct   < chgMin))  return false;
     if (chgMax  !== null && (r.change_pct   === null || r.change_pct   > chgMax))  return false;
     if (atrMin  !== null && (r.atr_multiple === null || r.atr_multiple < atrMin))  return false;
+    if (f.orStatus && r.or_status !== f.orStatus)                                  return false;
+    if (f.newsOnly === "1" && !r.has_news)                                         return false;
     return true;
   });
 }
 
 function applySort(rows: RadarRow[], key: SortKey, asc: boolean): RadarRow[] {
   return [...rows].sort((a, b) => {
-    const va = a[key] as number | string | null;
-    const vb = b[key] as number | string | null;
+    const va = a[key] as number | string | null | boolean;
+    const vb = b[key] as number | string | null | boolean;
     if (va === null && vb === null) return 0;
     if (va === null) return asc ? 1 : -1;
     if (vb === null) return asc ? -1 : 1;
     if (typeof va === "string") return asc ? va.localeCompare(vb as string) : (vb as string).localeCompare(va);
+    if (typeof va === "boolean") return asc ? (va ? 1 : -1) : (va ? -1 : 1);
     return asc ? (va as number) - (vb as number) : (vb as number) - (va as number);
   });
 }
@@ -152,6 +176,40 @@ function fmtVol(v: number): string {
 function pctColor(v: number | null): string {
   if (v === null) return "var(--muted)";
   return v > 0 ? "var(--bullish)" : v < 0 ? "var(--bearish)" : "var(--muted)";
+}
+
+// ── OR Status badge ───────────────────────────────────────────────────────────
+
+const OR_BADGE: Record<string, { label: string; color: string; bg: string }> = {
+  forming:    { label: "Forming",   color: "var(--muted)",    bg: "transparent" },
+  inside:     { label: "Inside",    color: "var(--text)",     bg: "transparent" },
+  broke_up:   { label: "Broke Up",  color: "var(--bullish)",  bg: "rgba(0,200,80,0.08)" },
+  broke_down: { label: "Broke Dn",  color: "var(--bearish)",  bg: "rgba(220,50,50,0.08)" },
+};
+
+function ORBadge({ row }: { row: RadarRow }) {
+  if (!row.or_status) return <span style={{ color: "var(--muted)" }}>—</span>;
+  const b = OR_BADGE[row.or_status] ?? OR_BADGE.inside;
+  const tooltip = row.or_break_atr !== null
+    ? `${row.or_break_atr.toFixed(2)} ATR beyond OR`
+    : row.or_high !== null && row.or_low !== null
+      ? `OR ${row.or_low.toFixed(2)}–${row.or_high.toFixed(2)}`
+      : undefined;
+  return (
+    <span
+      title={tooltip}
+      style={{
+        fontSize: 11, borderRadius: 4, padding: "2px 7px",
+        border: `1px solid ${b.color}`, color: b.color, background: b.bg,
+        cursor: tooltip ? "help" : "default", whiteSpace: "nowrap",
+      }}
+    >
+      {b.label}
+      {row.or_break_atr !== null && (
+        <span style={{ marginLeft: 4, opacity: 0.75 }}>{row.or_break_atr.toFixed(1)}×</span>
+      )}
+    </span>
+  );
 }
 
 // ── components ────────────────────────────────────────────────────────────────
@@ -213,13 +271,12 @@ export function RadarTable({ initial }: { initial: RadarResponse }) {
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [fetchData]);
 
-  // Column header click: toggle asc/desc on same column, reset to sensible default on new column
   function handleSort(key: SortKey) {
     if (key === sortKey) {
       setSortAsc(a => !a);
     } else {
       setSortKey(key);
-      setSortAsc(key === "symbol"); // text: default asc; numbers: default desc
+      setSortAsc(key === "symbol" || key === "or_status");
     }
   }
 
@@ -274,6 +331,39 @@ export function RadarTable({ initial }: { initial: RadarResponse }) {
           <FilterInput label="Chg% ≤"  value={filters.chgMax}  onChange={v => setF({ chgMax:  v })} />
           <FilterInput label="ATR× ≥"  value={filters.atrMin}  onChange={v => setF({ atrMin:  v })} />
 
+          {/* OR status dropdown */}
+          <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--muted)" }}>
+            OR Status
+            <select
+              value={filters.orStatus}
+              onChange={e => setF({ orStatus: e.target.value })}
+              style={{
+                padding: "3px 6px", background: "var(--bg)",
+                border: "1px solid var(--border)", borderRadius: 6,
+                color: "var(--text)", fontSize: 12, outline: "none",
+              }}
+            >
+              <option value="">All</option>
+              <option value="broke_up">Broke Up</option>
+              <option value="broke_down">Broke Down</option>
+              <option value="inside">Inside</option>
+              <option value="forming">Forming</option>
+            </select>
+          </label>
+
+          {/* News only toggle */}
+          <button
+            onClick={() => setF({ newsOnly: filters.newsOnly === "1" ? "" : "1" })}
+            style={{
+              padding: "4px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer",
+              border: `1px solid ${filters.newsOnly === "1" ? "var(--accent)" : "var(--border)"}`,
+              color: filters.newsOnly === "1" ? "var(--accent)" : "var(--muted)",
+              background: filters.newsOnly === "1" ? "rgba(var(--accent-rgb,100,180,255),0.08)" : "transparent",
+            }}
+          >
+            📰 News only
+          </button>
+
           {hasFilters && (
             <button
               onClick={() => setFilters(EMPTY_FILTERS)}
@@ -317,7 +407,7 @@ export function RadarTable({ initial }: { initial: RadarResponse }) {
         </div>
       ) : (
         <div style={{ overflowX: "auto", borderRadius: 10, border: "1px solid var(--border)" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, minWidth: 700 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, minWidth: 800 }}>
             <thead>
               <tr style={{ background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
                 {COLUMNS.map(col => (
@@ -347,9 +437,17 @@ export function RadarTable({ initial }: { initial: RadarResponse }) {
                       background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.018)",
                     }}
                   >
-                    {/* Symbol */}
+                    {/* Symbol + news chip */}
                     <td style={{ padding: "7px 12px", whiteSpace: "nowrap" }}>
                       <span style={{ color: "var(--text)", fontWeight: 600 }}>{row.symbol}</span>
+                      {row.has_news && (
+                        <span
+                          title={row.catalyst_line ?? undefined}
+                          style={{
+                            marginLeft: 6, fontSize: 12, cursor: row.catalyst_line ? "help" : "default",
+                          }}
+                        >📰</span>
+                      )}
                     </td>
                     {/* LTP */}
                     <td style={{ padding: "7px 12px", textAlign: "right", color: "var(--text)" }}>
@@ -378,6 +476,10 @@ export function RadarTable({ initial }: { initial: RadarResponse }) {
                     {/* ATR× */}
                     <td style={{ padding: "7px 12px", textAlign: "right", color: "var(--text)" }}>
                       {fmt(row.atr_multiple)}
+                    </td>
+                    {/* OR Status */}
+                    <td style={{ padding: "7px 12px" }}>
+                      <ORBadge row={row} />
                     </td>
                     {/* Volume */}
                     <td style={{ padding: "7px 12px", textAlign: "right", color: "var(--muted)" }}>

@@ -5,14 +5,12 @@ Runs as a standalone long-lived process during market hours (09:15–15:30 IST, 
 Every 45 seconds it calls Upstox Full Market Quote for all universe instruments in a
 single GET request, computes per-symbol metrics, and writes one snapshot to Redis.
 
-Redis keys:
-  radar:snapshot  — full snapshot JSON with generated_at + rows[], TTL 5 min
-  radar:status    — {"state": "ok" | "token_expired"}, TTL 5 min
-
-Token 401 handling:
-  - Sends a single Telegram alert (once per process lifetime)
-  - Sets radar:status = {"state": "token_expired"}
-  - Backs off to 5-minute retries until the token is refreshed
+Redis keys written:
+  radar:snapshot          — full snapshot JSON (TTL 5 min)
+  radar:status            — {"state": "ok"|"token_expired"} (TTL 5 min)
+  radar:or:{YYYY-MM-DD}   — frozen OR per-symbol dict (TTL 24h)
+  radar:news:{YYYY-MM-DD} — news/catalyst cache (TTL 1h)
+  radar:alerted:{date}:{rule}:{symbol} — dedup keys (TTL 24h)
 
 Usage:
     python realtime/radar_poller.py
@@ -39,6 +37,7 @@ from utils.logger import setup_logger
 from ingestion.universe import get_universe
 from ingestion.upstox_client import _get_bearer_token
 import storage.redis_client as _cache
+from realtime.radar_alerts import load_rules, process_alerts
 
 
 # ── constants ─────────────────────────────────────────────────────────────────
@@ -46,8 +45,14 @@ import storage.redis_client as _cache
 _POLL_INTERVAL    = 45    # seconds between polls during market hours
 _BACKOFF_INTERVAL = 300   # seconds to back off after a 401
 _SNAPSHOT_TTL     = 300   # Redis TTL in seconds (5 min)
-_SNAPSHOT_KEY     = "radar:snapshot"
-_STATUS_KEY       = "radar:status"
+_OR_TTL           = 86_400  # 24h — OR persists through poller restarts
+_NEWS_TTL         = 3_600   # 1h — news cache
+_NEWS_REFRESH_SECS = 3_600  # reload news cache every hour
+
+_SNAPSHOT_KEY   = "radar:snapshot"
+_STATUS_KEY     = "radar:status"
+_OR_KEY_PREFIX  = "radar:or:"
+_NEWS_KEY_PREFIX = "radar:news:"
 
 _BASE = "https://api.upstox.com/v2"
 
@@ -56,7 +61,7 @@ _SESSION_START_H, _SESSION_START_M = 9, 15
 _SESSION_END_H,   _SESSION_END_M   = 15, 30
 _SESSION_MINS = 375   # minutes from 09:15 to 15:30
 
-# NSE trading holidays — extend this list annually before year-start
+# NSE trading holidays — extend annually before year-start
 HOLIDAYS: frozenset[str] = frozenset({
     "2026-01-26",  # Republic Day
     "2026-03-25",  # Holi
@@ -78,7 +83,7 @@ _token_alerted: bool = False
 
 def _is_market_open() -> bool:
     now = datetime.now(IST)
-    if now.weekday() >= 5:                             # Saturday / Sunday
+    if now.weekday() >= 5:
         return False
     if now.strftime("%Y-%m-%d") in HOLIDAYS:
         return False
@@ -91,7 +96,7 @@ def _session_fraction() -> float:
     """
     Pro-rata fraction of the session elapsed: minutes_since_0915 / 375.
     Clamped to [0.05, 1.0] so RVOL is never division-by-zero in the first few seconds.
-    v1 — straight pro-rata. TODO v2: use an intraday volume-profile curve for more accurate RVOL.
+    v1 — straight pro-rata. TODO v2: use an intraday volume-profile curve.
     """
     now   = datetime.now(IST)
     start = now.replace(hour=_SESSION_START_H, minute=_SESSION_START_M, second=0, microsecond=0)
@@ -99,7 +104,167 @@ def _session_fraction() -> float:
     return max(0.05, min(1.0, elapsed_mins / _SESSION_MINS))
 
 
-# ── Telegram alert ────────────────────────────────────────────────────────────
+# ── Opening Range helpers ─────────────────────────────────────────────────────
+
+def _or_window_end_hm() -> tuple[int, int]:
+    """Return (hour, minute) when the OR window closes."""
+    total = _SESSION_START_M + settings.or_window_minutes
+    return _SESSION_START_H + total // 60, total % 60
+
+
+def _should_freeze_or(now_ist: datetime) -> bool:
+    """True once the OR window has closed (default 09:30)."""
+    h, m = _or_window_end_hm()
+    freeze = now_ist.replace(hour=h, minute=m, second=0, microsecond=0)
+    return now_ist >= freeze
+
+
+def _compute_or_status(
+    symbol:        str,
+    ltp:           float | None,
+    high:          float | None,
+    low:           float | None,
+    prev_close:    float | None,
+    avg_range_pct: float | None,
+    now_ist:       datetime,
+    or_state:      dict,
+) -> tuple[float | None, float | None, str, float | None]:
+    """
+    Compute OR fields for one symbol. Mutates or_state in-place to freeze and latch status.
+
+    Freeze logic:
+      - Before OR window closes: returns "forming" (no entry in or_state yet).
+      - At first poll >= OR window end: freezes using current session high/low (which
+        equal the OR during the window) and never updates them again.
+
+    Latch logic:
+      - Once "broke_up" or "broke_down", never flips back to "inside".
+      - A break of the opposite side updates to the new break direction.
+
+    Returns (or_high, or_low, or_status, or_break_atr).
+    """
+    if symbol not in or_state:
+        if not _should_freeze_or(now_ist) or high is None or low is None:
+            return None, None, "forming", None
+        # Freeze at OR window close
+        or_state[symbol] = {
+            "or_high":   round(high, 4),
+            "or_low":    round(low,  4),
+            "frozen_at": now_ist.isoformat(),
+            "or_status": "inside",
+        }
+
+    entry   = or_state[symbol]
+    or_high = entry["or_high"]
+    or_low  = entry["or_low"]
+
+    if ltp is None:
+        return or_high, or_low, entry.get("or_status", "inside"), None
+
+    # Latch: once broken, do not revert to inside; opposite break wins
+    prev_status = entry.get("or_status", "inside")
+    if ltp > or_high:
+        new_status = "broke_up"
+    elif ltp < or_low:
+        new_status = "broke_down"
+    else:
+        new_status = prev_status if prev_status in ("broke_up", "broke_down") else "inside"
+
+    entry["or_status"] = new_status
+
+    # or_break_atr: distance beyond broken boundary expressed in ATR units
+    or_break_atr = None
+    if new_status in ("broke_up", "broke_down") and avg_range_pct and avg_range_pct > 0:
+        ref = prev_close or (or_high + or_low) / 2
+        atr_price = ref * avg_range_pct
+        if atr_price > 0:
+            distance = (ltp - or_high) if new_status == "broke_up" else (or_low - ltp)
+            or_break_atr = round(max(0.0, distance) / atr_price, 2)
+
+    return or_high, or_low, new_status, or_break_atr
+
+
+def _load_or_state(trade_date: str) -> dict:
+    """Load today's frozen OR dict from Redis. Returns {} if absent or on error."""
+    data = _cache.get(f"{_OR_KEY_PREFIX}{trade_date}")
+    return data if isinstance(data, dict) else {}
+
+
+def _save_or_state(trade_date: str, or_state: dict) -> None:
+    """Persist the OR dict to Redis with 24h TTL."""
+    _cache.set_ex(f"{_OR_KEY_PREFIX}{trade_date}", or_state, _OR_TTL)
+
+
+# ── News / catalyst cache ─────────────────────────────────────────────────────
+
+def _load_news_from_db() -> dict[str, dict]:
+    """
+    Query the most recent briefing for per-symbol catalyst_line and headline count.
+    Uses the most recent briefing (ORDER BY id DESC) because setups.trading_date is
+    the previous trading day, not today's calendar date.
+    Returns {} on any DB error (graceful degradation — news fusion is non-fatal).
+    """
+    try:
+        conn = psycopg2.connect(
+            host=settings.postgres_host, port=settings.postgres_port,
+            dbname=settings.postgres_db, user=settings.postgres_user,
+            password=settings.postgres_password,
+        )
+        result: dict[str, dict] = {}
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, trading_date FROM daily_briefings ORDER BY id DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return {}
+            briefing_id, trading_date = row
+
+            # catalyst_line per symbol from setups for that trading date
+            cur.execute(
+                "SELECT symbol, catalyst_line FROM setups WHERE trading_date = %s",
+                (trading_date,),
+            )
+            for sym, cat in cur.fetchall():
+                result[sym.upper()] = {"catalyst_line": cat, "headline_count": 0}
+
+            # headline count per symbol from the briefing's headlines
+            cur.execute(
+                "SELECT symbols FROM headlines WHERE briefing_id = %s",
+                (briefing_id,),
+            )
+            for (syms,) in cur.fetchall():
+                for sym in syms or []:
+                    s = str(sym).upper()
+                    if s in result:
+                        result[s]["headline_count"] = result[s].get("headline_count", 0) + 1
+                    else:
+                        result[s] = {"catalyst_line": None, "headline_count": 1}
+        conn.close()
+        logger.info(
+            f"news_cache: loaded {len(result)} symbols "
+            f"(briefing_id={briefing_id}, trading_date={trading_date})"
+        )
+        return result
+    except Exception as exc:
+        logger.warning(f"news_cache: DB load failed (non-fatal): {exc}")
+        return {}
+
+
+def _load_news_cache(calendar_date: str) -> dict[str, dict]:
+    """Load news cache from Redis (TTL 1h), falling back to DB on miss."""
+    key = f"{_NEWS_KEY_PREFIX}{calendar_date}"
+    cached = _cache.get(key)
+    if cached is not None:
+        return cached
+    data = _load_news_from_db()
+    if data:
+        _cache.set_ex(key, data, _NEWS_TTL)
+    return data
+
+
+# ── Telegram 401 alert ────────────────────────────────────────────────────────
 
 def _send_token_alert() -> None:
     global _token_alerted
@@ -134,7 +299,7 @@ def _get_full_quotes(http: httpx.Client, instrument_keys: list[str]) -> dict | N
     """
     GET /v2/market-quote/quotes for up to 500 instruments in one request.
     Returns the data dict keyed by instrument_key, or None on network error.
-    Returns {"_401": True} exclusively on HTTP 401 so the caller can handle it.
+    Returns {"_401": True} exclusively on HTTP 401.
     """
     encoded = ",".join(k.replace("|", "%7C") for k in instrument_keys)
     url     = f"{_BASE}/market-quote/quotes?instrument_key={encoded}"
@@ -192,7 +357,6 @@ def _compute_row(
     avg_volume_20d = baseline.get("avg_volume_20d")    if baseline else None
     avg_range_pct  = baseline.get("avg_range_pct_20d") if baseline else None
 
-    # gap_pct: fixed after open — null if today_open not yet available
     gap_pct = (
         round((today_open - prev_close) / prev_close * 100, 2)
         if today_open and prev_close and prev_close > 0
@@ -288,15 +452,21 @@ def _load_baselines(trade_date: str) -> dict[str, dict]:
 # ── poll cycle ────────────────────────────────────────────────────────────────
 
 def _poll_cycle(
-    http:      httpx.Client,
-    universe:  list[dict],
-    baselines: dict[str, dict],
+    http:        httpx.Client,
+    universe:    list[dict],
+    baselines:   dict[str, dict],
+    or_state:    dict,
+    trade_date:  str,
+    news_cache:  dict,
+    alert_rules: list[dict],
 ) -> bool:
     """
     Execute one poll cycle.
+    Mutates or_state in-place with newly frozen OR values.
     Returns False if a 401 was detected (caller should back off and rebuild HTTP client).
     """
     fraction = _session_fraction()
+    now_ist  = datetime.now(IST)
 
     key_to_meta: dict[str, tuple[str, str]] = {}
     for row in universe:
@@ -319,18 +489,48 @@ def _poll_cycle(
         _cache.set_ex(_STATUS_KEY, {"state": "token_expired"}, _SNAPSHOT_TTL)
         return False
 
-    radar_rows = []
-    missing    = 0
+    radar_rows: list[dict] = []
+    missing = 0
+
     for ikey, (symbol, membership) in key_to_meta.items():
         entry = quote_data.get(ikey)
         if not entry:
             missing += 1
             continue
         baseline = baselines.get(symbol)
-        radar_rows.append(_compute_row(symbol, entry, baseline, fraction, membership))
+        row = _compute_row(symbol, entry, baseline, fraction, membership)
+
+        # B: Opening Range fields
+        avg_range_pct = baseline.get("avg_range_pct_20d") if baseline else None
+        or_h, or_l, or_status, or_break_atr = _compute_or_status(
+            symbol,
+            row["ltp"],
+            row["high"],
+            row["low"],
+            row["prev_close"],
+            avg_range_pct,
+            now_ist,
+            or_state,
+        )
+        row["or_high"]      = or_h
+        row["or_low"]       = or_l
+        row["or_status"]    = or_status
+        row["or_break_atr"] = or_break_atr
+
+        # D: News / catalyst fusion
+        news = news_cache.get(symbol, {})
+        row["has_news"]       = bool(news.get("catalyst_line") or news.get("headline_count"))
+        row["catalyst_line"]  = news.get("catalyst_line")
+        row["headline_count"] = news.get("headline_count", 0)
+
+        radar_rows.append(row)
 
     if missing:
         logger.debug(f"radar_poller: {missing} instruments missing from quote response")
+
+    # Persist OR state whenever it's non-empty (cheap write, handles status latches too)
+    if or_state:
+        _save_or_state(trade_date, or_state)
 
     snapshot = {
         "generated_at": datetime.now(IST).isoformat(),
@@ -341,8 +541,12 @@ def _poll_cycle(
 
     logger.info(
         f"radar_poller: snapshot written — {len(radar_rows)} rows, "
-        f"session_fraction={fraction:.2f}, missing_instruments={missing}"
+        f"session_fraction={fraction:.2f}, missing={missing}, or_frozen={len(or_state)}"
     )
+
+    # C: Telegram alerts (after snapshot is written so stale=False)
+    process_alerts(radar_rows, alert_rules, trade_date, market_open=True, stale=False)
+
     return True
 
 
@@ -365,32 +569,51 @@ def main() -> None:
     trade_date = date.today().isoformat()
     baselines  = _load_baselines(trade_date)
     logger.info(
-        f"radar_poller: loaded {len(baselines)} baselines for {trade_date}"
+        f"radar_poller: {len(baselines)} baselines for {trade_date}"
         + (" (WARNING: 0 baselines — run radar_baselines.run_baselines() first)"
            if not baselines else "")
     )
+
+    # B: load any OR state frozen earlier today (survives poller restarts)
+    or_state = _load_or_state(trade_date)
+    logger.info(f"radar_poller: {len(or_state)} OR states loaded for {trade_date}")
+
+    # D: news/catalyst cache
+    news_cache     = _load_news_cache(trade_date)
+    news_loaded_at = time.monotonic()
+
+    # C: alert rules (static — loaded once at startup)
+    alert_rules = load_rules()
+    logger.info(f"radar_poller: {len(alert_rules)} alert rules loaded")
 
     while True:
         if not _is_market_open():
             logger.debug("radar_poller: outside market hours — sleeping 60s")
             time.sleep(60)
-            # Reload baselines when the calendar date changes
             new_date = date.today().isoformat()
             if new_date != trade_date:
-                trade_date = new_date
-                baselines  = _load_baselines(trade_date)
+                trade_date     = new_date
+                baselines      = _load_baselines(trade_date)
+                or_state       = _load_or_state(trade_date)
+                news_cache     = _load_news_cache(trade_date)
+                news_loaded_at = time.monotonic()
                 logger.info(
                     f"radar_poller: new trade date {trade_date}, "
                     f"reloaded baselines ({len(baselines)} rows)"
                 )
             continue
 
-        ok = _poll_cycle(http, universe, baselines)
+        # D: hourly news cache refresh
+        if time.monotonic() - news_loaded_at > _NEWS_REFRESH_SECS:
+            # Invalidate Redis key so _load_news_cache fetches fresh from DB
+            _cache.set_ex(f"{_NEWS_KEY_PREFIX}{trade_date}", {}, 1)
+            news_cache     = _load_news_cache(trade_date)
+            news_loaded_at = time.monotonic()
+            logger.debug("radar_poller: news cache refreshed")
+
+        ok = _poll_cycle(http, universe, baselines, or_state, trade_date, news_cache, alert_rules)
         if not ok:
-            # 401 — back off and rebuild client in case the token was refreshed
-            logger.warning(
-                f"radar_poller: backing off {_BACKOFF_INTERVAL}s after 401"
-            )
+            logger.warning(f"radar_poller: backing off {_BACKOFF_INTERVAL}s after 401")
             time.sleep(_BACKOFF_INTERVAL)
             http = _build_http()
         else:

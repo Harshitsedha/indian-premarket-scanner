@@ -1,0 +1,26 @@
+[
+  {
+    "name": "orb_break_volume",
+    "description": "OR break (either direction) with volume confirmation (RVOL ≥ 2.0)",
+    "conditions": {
+      "or_status": ["broke_up", "broke_down"],
+      "rvol_min": 2.0
+    }
+  },
+  {
+    "name": "gap_momentum",
+    "description": "Large gap (≥2%) with strong momentum confirmation (RVOL ≥ 2.5)",
+    "conditions": {
+      "abs_gap_pct_min": 2.0,
+      "rvol_min": 2.5
+    }
+  },
+  {
+    "name": "range_expansion",
+    "description": "Intraday range expansion ≥2× ATR with volume (RVOL ≥ 2.0)",
+    "conditions": {
+      "atr_multiple_min": 2.0,
+      "rvol_min": 2.0
+    }
+  }
+]

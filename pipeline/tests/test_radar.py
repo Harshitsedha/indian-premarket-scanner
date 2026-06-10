@@ -20,6 +20,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from realtime.radar_poller import (
+    _compute_or_status,
     _compute_row,
     _poll_cycle,
     _session_fraction,
@@ -173,20 +174,29 @@ class TestPollCycle:
             "NSE_EQ|INE009A01021": _entry(ltp=1500.0, open_=1480.0, high=1510.0, low=1475.0, volume=400_000, prev_close=1490.0),
         }
 
+    def _call(self, http, baselines, quote_data, mock_cache, written):
+        """Helper: call _poll_cycle with the full new signature."""
+        with patch("realtime.radar_poller._get_full_quotes", return_value=quote_data), \
+             patch("realtime.radar_poller._cache", mock_cache), \
+             patch("realtime.radar_poller._session_fraction", return_value=0.5), \
+             patch("realtime.radar_poller.process_alerts"):
+            mock_cache.set_ex.side_effect = lambda k, v, ttl: written.update({k: v})
+            return _poll_cycle(
+                http, self._universe(), baselines,
+                or_state={}, trade_date="2026-06-10",
+                news_cache={}, alert_rules=[],
+            )
+
     def test_success_writes_snapshot(self):
         """Successful poll writes radar:snapshot to Redis."""
-        http = MagicMock()
+        http      = MagicMock()
+        mock_cache = MagicMock()
         baselines = {
             "RELIANCE": _baseline(prev_close=2900.0, avg_vol=2_000_000),
             "INFY":     _baseline(prev_close=1490.0, avg_vol=1_000_000),
         }
         written = {}
-
-        with patch("realtime.radar_poller._get_full_quotes", return_value=self._quote_data()), \
-             patch("realtime.radar_poller._cache") as mock_cache, \
-             patch("realtime.radar_poller._session_fraction", return_value=0.5):
-            mock_cache.set_ex.side_effect = lambda k, v, ttl: written.update({k: v})
-            result = _poll_cycle(http, self._universe(), baselines)
+        result = self._call(http, baselines, self._quote_data(), mock_cache, written)
 
         assert result is True
         assert _SNAPSHOT_KEY in written
@@ -198,18 +208,11 @@ class TestPollCycle:
 
     def test_partial_symbols_missing(self):
         """If some instrument_keys are absent from the quote response, those rows are skipped."""
-        partial_data = {
-            "NSE_EQ|INE002A01018": _entry(),   # only RELIANCE, no INFY
-        }
-        http      = MagicMock()
-        baselines = {"RELIANCE": _baseline()}
-        written   = {}
-
-        with patch("realtime.radar_poller._get_full_quotes", return_value=partial_data), \
-             patch("realtime.radar_poller._cache") as mock_cache, \
-             patch("realtime.radar_poller._session_fraction", return_value=0.5):
-            mock_cache.set_ex.side_effect = lambda k, v, ttl: written.update({k: v})
-            result = _poll_cycle(http, self._universe(), baselines)
+        partial_data = {"NSE_EQ|INE002A01018": _entry()}   # only RELIANCE, no INFY
+        http       = MagicMock()
+        mock_cache = MagicMock()
+        written    = {}
+        result = self._call(http, {"RELIANCE": _baseline()}, partial_data, mock_cache, written)
 
         assert result is True
         snap = written[_SNAPSHOT_KEY]
@@ -218,28 +221,38 @@ class TestPollCycle:
 
     def test_401_sets_status_and_returns_false(self):
         """401 response sets radar:status, sends Telegram alert, returns False."""
-        http = MagicMock()
-        written = {}
+        http       = MagicMock()
+        mock_cache = MagicMock()
+        written    = {}
 
         with patch("realtime.radar_poller._get_full_quotes", return_value={"_401": True}), \
-             patch("realtime.radar_poller._cache") as mock_cache, \
+             patch("realtime.radar_poller._cache", mock_cache), \
              patch("realtime.radar_poller._send_token_alert") as mock_alert:
             mock_cache.set_ex.side_effect = lambda k, v, ttl: written.update({k: v})
-            result = _poll_cycle(http, self._universe(), {})
+            result = _poll_cycle(
+                http, self._universe(), {},
+                or_state={}, trade_date="2026-06-10",
+                news_cache={}, alert_rules=[],
+            )
 
         assert result is False
         mock_alert.assert_called_once()
         assert _STATUS_KEY in written
         assert written[_STATUS_KEY]["state"] == "token_expired"
-        # snapshot must NOT have been written on 401
         assert _SNAPSHOT_KEY not in written
 
     def test_none_response_does_not_crash(self):
         """None from _get_full_quotes (network error) returns True and writes nothing."""
-        http = MagicMock()
+        http       = MagicMock()
+        mock_cache = MagicMock()
+
         with patch("realtime.radar_poller._get_full_quotes", return_value=None), \
-             patch("realtime.radar_poller._cache") as mock_cache:
-            result = _poll_cycle(http, self._universe(), {})
+             patch("realtime.radar_poller._cache", mock_cache):
+            result = _poll_cycle(
+                http, self._universe(), {},
+                or_state={}, trade_date="2026-06-10",
+                news_cache={}, alert_rules=[],
+            )
 
         assert result is True
         mock_cache.set_ex.assert_not_called()
@@ -415,3 +428,328 @@ class TestBaselinesIdempotency:
         with patch("processing.radar_baselines._db", side_effect=Exception("DB down")):
             result = baselines_already_computed("2026-06-10")
         assert result is False
+
+
+# ── Opening Range tracking ────────────────────────────────────────────────────
+
+class TestORTracking:
+    """Tests for _compute_or_status: freeze, latch, and break logic."""
+
+    def _now_ist(self, h: int, m: int, s: int = 0):
+        return datetime(2026, 6, 10, h, m, s, tzinfo=IST)
+
+    def _baseline_vals(self):
+        return {"avg_range_pct_20d": 0.02}  # 2% ATR
+
+    # -- freeze boundary --
+
+    def test_forming_before_window_end(self):
+        """Before 09:30 and no prior freeze → status is 'forming'."""
+        from realtime.radar_poller import _compute_or_status
+
+        or_state = {}
+        _, _, status, _ = _compute_or_status(
+            "RELIANCE", 2950.0, 2960.0, 2910.0, 2900.0, 0.02,
+            self._now_ist(9, 20), or_state,
+        )
+        assert status == "forming"
+        assert "RELIANCE" not in or_state   # not yet frozen
+
+    def test_freezes_at_window_end(self):
+        """At exactly 09:30, symbol gets frozen using current session high/low."""
+        from realtime.radar_poller import _compute_or_status
+
+        or_state = {}
+        or_h, or_l, status, _ = _compute_or_status(
+            "RELIANCE", 2930.0, 2960.0, 2910.0, 2900.0, 0.02,
+            self._now_ist(9, 30), or_state,
+        )
+        assert or_h == pytest.approx(2960.0)
+        assert or_l == pytest.approx(2910.0)
+        assert status == "inside"
+        assert "RELIANCE" in or_state
+        assert or_state["RELIANCE"]["frozen_at"] is not None
+
+    def test_no_update_after_freeze(self):
+        """Once frozen, subsequent calls do not change or_high/or_low even if H/L changes."""
+        from realtime.radar_poller import _compute_or_status
+
+        or_state = {}
+        # First call at 09:30 — freeze with H=2960, L=2910
+        _compute_or_status(
+            "RELIANCE", 2930.0, 2960.0, 2910.0, 2900.0, 0.02,
+            self._now_ist(9, 30), or_state,
+        )
+        # Second call at 10:00 — H/L have expanded to 2980/2900 (session highs grow)
+        or_h, or_l, _, _ = _compute_or_status(
+            "RELIANCE", 2935.0, 2980.0, 2900.0, 2900.0, 0.02,
+            self._now_ist(10, 0), or_state,
+        )
+        # OR values must remain at their frozen values
+        assert or_h == pytest.approx(2960.0)
+        assert or_l == pytest.approx(2910.0)
+
+    # -- break logic --
+
+    def test_status_broke_up(self):
+        """LTP above or_high → 'broke_up'."""
+        from realtime.radar_poller import _compute_or_status
+
+        or_state = {}
+        _compute_or_status("INFY", 1500.0, 1510.0, 1480.0, 1490.0, 0.02,
+                            self._now_ist(9, 30), or_state)
+        _, _, status, break_atr = _compute_or_status(
+            "INFY", 1515.0, 1520.0, 1480.0, 1490.0, 0.02,
+            self._now_ist(10, 0), or_state,
+        )
+        assert status == "broke_up"
+        assert break_atr is not None and break_atr > 0
+
+    def test_status_broke_down(self):
+        """LTP below or_low → 'broke_down'."""
+        from realtime.radar_poller import _compute_or_status
+
+        or_state = {}
+        _compute_or_status("TCS", 3500.0, 3510.0, 3480.0, 3490.0, 0.02,
+                            self._now_ist(9, 30), or_state)
+        _, _, status, _ = _compute_or_status(
+            "TCS", 3475.0, 3510.0, 3470.0, 3490.0, 0.02,
+            self._now_ist(10, 0), or_state,
+        )
+        assert status == "broke_down"
+
+    def test_latch_no_revert_to_inside(self):
+        """Once 'broke_up', LTP retreating inside OR should NOT revert to 'inside'."""
+        from realtime.radar_poller import _compute_or_status
+
+        or_state = {}
+        _compute_or_status("HDFC", 1800.0, 1810.0, 1780.0, 1790.0, 0.02,
+                            self._now_ist(9, 30), or_state)
+        # Break up
+        _compute_or_status("HDFC", 1815.0, 1815.0, 1780.0, 1790.0, 0.02,
+                            self._now_ist(10, 0), or_state)
+        assert or_state["HDFC"]["or_status"] == "broke_up"
+        # LTP retreats inside range
+        _, _, status, _ = _compute_or_status(
+            "HDFC", 1795.0, 1815.0, 1780.0, 1790.0, 0.02,
+            self._now_ist(10, 15), or_state,
+        )
+        assert status == "broke_up"   # latched — does not flip to "inside"
+
+    def test_double_sided_break(self):
+        """'broke_up' followed by LTP below or_low → updates to 'broke_down'."""
+        from realtime.radar_poller import _compute_or_status
+
+        or_state = {}
+        _compute_or_status("WIPRO", 500.0, 510.0, 490.0, 495.0, 0.02,
+                            self._now_ist(9, 30), or_state)
+        # Breaks up
+        _compute_or_status("WIPRO", 512.0, 515.0, 490.0, 495.0, 0.02,
+                            self._now_ist(10, 0), or_state)
+        assert or_state["WIPRO"]["or_status"] == "broke_up"
+        # Then breaks down on the opposite side
+        _, _, status, _ = _compute_or_status(
+            "WIPRO", 488.0, 515.0, 488.0, 495.0, 0.02,
+            self._now_ist(10, 30), or_state,
+        )
+        assert status == "broke_down"
+
+
+# ── Alert rule evaluation ─────────────────────────────────────────────────────
+
+class TestAlertEvaluation:
+    def _row(self, **kwargs) -> dict:
+        base = {
+            "symbol": "TEST", "ltp": 100.0, "change_pct": 1.0, "gap_pct": 1.0,
+            "rvol": 1.0, "atr_multiple": 1.0, "or_status": "inside",
+            "or_high": 102.0, "or_low": 98.0, "or_break_atr": None,
+            "catalyst_line": None,
+        }
+        base.update(kwargs)
+        return base
+
+    def test_orb_break_volume_fires(self):
+        from realtime.radar_alerts import load_rules, _matches
+        rules = load_rules()
+        orb_rule = next(r for r in rules if r["name"] == "orb_break_volume")
+        row = self._row(or_status="broke_up", rvol=2.5)
+        assert _matches(row, orb_rule["conditions"])
+
+    def test_orb_break_volume_no_fire_low_rvol(self):
+        from realtime.radar_alerts import load_rules, _matches
+        rules = load_rules()
+        orb_rule = next(r for r in rules if r["name"] == "orb_break_volume")
+        row = self._row(or_status="broke_up", rvol=1.5)
+        assert not _matches(row, orb_rule["conditions"])
+
+    def test_gap_momentum_fires(self):
+        from realtime.radar_alerts import load_rules, _matches
+        rules = load_rules()
+        gm_rule = next(r for r in rules if r["name"] == "gap_momentum")
+        row = self._row(gap_pct=3.0, rvol=2.5)
+        assert _matches(row, gm_rule["conditions"])
+
+    def test_range_expansion_fires(self):
+        from realtime.radar_alerts import load_rules, _matches
+        rules = load_rules()
+        re_rule = next(r for r in rules if r["name"] == "range_expansion")
+        row = self._row(atr_multiple=2.5, rvol=2.0)
+        assert _matches(row, re_rule["conditions"])
+
+
+# ── Alert dedup ───────────────────────────────────────────────────────────────
+
+class TestAlertDedup:
+    def _row(self, symbol="RELIANCE", or_status="broke_up", rvol=3.0):
+        return {
+            "symbol": symbol, "ltp": 2950.0, "change_pct": 1.5, "gap_pct": 0.5,
+            "rvol": rvol, "atr_multiple": 1.5, "or_status": or_status,
+            "or_high": 2940.0, "or_low": 2910.0, "or_break_atr": 0.5,
+            "catalyst_line": None,
+        }
+
+    def test_fires_first_time(self):
+        """setnx_ex returns True → alert is sent."""
+        from realtime.radar_alerts import process_alerts, load_rules
+
+        rules = load_rules()
+        rows  = [self._row()]
+        sent  = []
+
+        with patch("realtime.radar_alerts._cache") as mc, \
+             patch("realtime.radar_alerts._send_alert", side_effect=sent.append):
+            mc.setnx_ex.return_value = True   # first time — key newly set
+            process_alerts(rows, rules, "2026-06-10", market_open=True, stale=False)
+
+        assert len(sent) >= 1
+
+    def test_dedup_skips_second_time(self):
+        """setnx_ex returns False → already alerted, no send."""
+        from realtime.radar_alerts import process_alerts, load_rules
+
+        rules = load_rules()
+        rows  = [self._row()]
+        sent  = []
+
+        with patch("realtime.radar_alerts._cache") as mc, \
+             patch("realtime.radar_alerts._send_alert", side_effect=sent.append):
+            mc.setnx_ex.return_value = False  # key already existed
+            process_alerts(rows, rules, "2026-06-10", market_open=True, stale=False)
+
+        assert len(sent) == 0
+
+    def test_dedup_redis_backed_restart(self):
+        """Simulated restart: Redis still holds the key (returns False) → no re-alert."""
+        from realtime.radar_alerts import _is_new_alert
+
+        with patch("realtime.radar_alerts._cache") as mc:
+            mc.setnx_ex.return_value = False   # Redis already has this key
+            result = _is_new_alert("orb_break_volume", "RELIANCE", "2026-06-10")
+
+        assert result is False
+
+
+# ── News / catalyst fusion ────────────────────────────────────────────────────
+
+class TestNewsJoin:
+    def _universe(self):
+        return [
+            {"symbol": "RELIANCE", "instrument_key": "NSE_EQ|INE002A01018", "index_membership": "BACKTESTER"},
+        ]
+
+    def _quote_data(self):
+        return {
+            "NSE_EQ|INE002A01018": {
+                "last_price": 2950.0,
+                "ohlc": {"open": 2920.0, "high": 2960.0, "low": 2910.0, "close": 2900.0},
+                "volume": 800_000,
+            },
+        }
+
+    def test_missing_news_cache_no_crash(self):
+        """Empty news_cache → all rows have has_news=False, no crash."""
+        http      = MagicMock()
+        baselines = {"RELIANCE": _baseline(prev_close=2900.0, avg_vol=2_000_000)}
+        written   = {}
+
+        with patch("realtime.radar_poller._get_full_quotes", return_value=self._quote_data()), \
+             patch("realtime.radar_poller._cache") as mock_cache, \
+             patch("realtime.radar_poller._session_fraction", return_value=0.5), \
+             patch("realtime.radar_poller.process_alerts"):
+            mock_cache.set_ex.side_effect = lambda k, v, ttl: written.update({k: v})
+            result = _poll_cycle(
+                http, self._universe(), baselines,
+                or_state={}, trade_date="2026-06-10",
+                news_cache={}, alert_rules=[],
+            )
+
+        assert result is True
+        snap = written[_SNAPSHOT_KEY]
+        row  = snap["rows"][0]
+        assert row["has_news"] is False
+        assert row["catalyst_line"] is None
+        assert row["headline_count"] == 0
+
+    def test_news_fusion_injects_catalyst(self):
+        """Symbol present in news_cache → has_news=True and catalyst_line populated."""
+        http      = MagicMock()
+        baselines = {"RELIANCE": _baseline(prev_close=2900.0, avg_vol=2_000_000)}
+        written   = {}
+        news      = {"RELIANCE": {"catalyst_line": "Q4 beat; Jio strong", "headline_count": 3}}
+
+        with patch("realtime.radar_poller._get_full_quotes", return_value=self._quote_data()), \
+             patch("realtime.radar_poller._cache") as mock_cache, \
+             patch("realtime.radar_poller._session_fraction", return_value=0.5), \
+             patch("realtime.radar_poller.process_alerts"):
+            mock_cache.set_ex.side_effect = lambda k, v, ttl: written.update({k: v})
+            _poll_cycle(
+                http, self._universe(), baselines,
+                or_state={}, trade_date="2026-06-10",
+                news_cache=news, alert_rules=[],
+            )
+
+        row = written[_SNAPSHOT_KEY]["rows"][0]
+        assert row["has_news"] is True
+        assert row["catalyst_line"] == "Q4 beat; Jio strong"
+        assert row["headline_count"] == 3
+
+
+# ── Redis host configuration ──────────────────────────────────────────────────
+
+class TestRedisHostConfig:
+    # Use _env_file=None + pop the env var so neither the project .env (which may have
+    # redis_host=redis for Docker) nor the process environment interferes.
+
+    def _minimal(self, **extra):
+        from utils.config import Settings
+        return Settings(
+            _env_file=None,
+            anthropic_api_key="x",
+            upstox_api_key="x",
+            upstox_api_secret="x",
+            telegram_bot_token="x",
+            telegram_chat_id="x",
+            postgres_password="x",
+            **extra,
+        )
+
+    def test_redis_host_default_is_loopback(self):
+        """Code-level default for redis_host is 127.0.0.1 (not Docker's 'redis')."""
+        import os
+        saved = os.environ.pop("REDIS_HOST", None)
+        try:
+            s = self._minimal()
+            assert s.redis_host == "127.0.0.1"
+        finally:
+            if saved is not None:
+                os.environ["REDIS_HOST"] = saved
+
+    def test_redis_host_env_override(self):
+        """REDIS_HOST env var overrides the code default."""
+        import os
+        os.environ["REDIS_HOST"] = "myredis.internal"
+        try:
+            s = self._minimal()
+            assert s.redis_host == "myredis.internal"
+        finally:
+            del os.environ["REDIS_HOST"]

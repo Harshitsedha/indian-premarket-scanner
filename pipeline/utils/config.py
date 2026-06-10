@@ -45,9 +45,13 @@ class Settings(BaseSettings):
     postgres_user: str = "premarket"
     postgres_password: str
 
-    # Redis
-    redis_host: str = "localhost"
+    # Redis — default 127.0.0.1 so the host-based radar poller works without config;
+    # Docker-internal services override via REDIS_HOST=redis in their environment.
+    redis_host: str = "127.0.0.1"
     redis_port: int = 6379
+
+    # Radar screener
+    or_window_minutes: int = 15   # OR_WINDOW_MINUTES env var overrides
 
     # App
     app_env: str = "development"
