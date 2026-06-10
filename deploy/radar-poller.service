@@ -1,17 +1,15 @@
 [Unit]
 Description=PreMarket Pro — Intraday Radar Poller
-Documentation=https://github.com/Harshitsedha/indian-premarket-scanner
-After=network.target postgresql.service redis.service
-Wants=postgresql.service redis.service
+After=network.target
+Wants=network.target
 
 [Service]
 Type=simple
-User=premarket
-WorkingDirectory=/home/premarket/premarket/pipeline
-ExecStart=/home/premarket/.venv/bin/python realtime/radar_poller.py
+User=root
+WorkingDirectory=/opt/premarket/pipeline
+ExecStart=/opt/premarket/pipeline/.venv/bin/python realtime/radar_poller.py
 Restart=on-failure
 RestartSec=10s
-# Safe to restart at any time — poller is stateless (all state lives in Redis + DB)
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=radar-poller
