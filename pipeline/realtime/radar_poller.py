@@ -242,6 +242,9 @@ def _get_full_quotes(http: httpx.Client, instrument_keys: list[str]) -> dict | N
         return None
 
     raw = body.get("data", {})
+    # TEMP DIAGNOSTIC (remove with the :410 resolver fix): log the literal key shape
+    # Upstox returns so we match the resolver to the real response, not a guess.
+    logger.info(f"radar_poller: quote_data sample keys = {list(raw.keys())[:5]}")
     # Upstox may return pipe-encoded keys (%7C) or literal pipe (|) — normalise to pipe.
     return {k.replace("%7C", "|").replace("%7c", "|"): v for k, v in raw.items()}
 
@@ -442,12 +445,31 @@ def _poll_cycle(
     }
     _cache.set_ex(f"{_DAY_META_KEY_PREFIX}{trade_date}", day_meta, _DAY_META_TTL)
 
+    # All-symbols-missing is a failure even though Redis accepts the empty snapshot:
+    # the quote response keys matched no instrument_key, so /radar renders 0 of 0.
+    # Surface it loudly and mark status degraded so the dashboard/Telegram can react.
+    total_symbols = len(key_to_meta)
+    all_missing   = total_symbols > 0 and missing == total_symbols
+    if all_missing:
+        logger.error(
+            f"radar_poller: ALL {total_symbols} symbols unresolved from quote response "
+            f"— 0 rows written; likely a quote key-format mismatch at the :410 lookup"
+        )
+
     snapshot = {
         "generated_at": datetime.now(IST).isoformat(),
         "rows":         radar_rows,
     }
-    _cache.set_ex(_SNAPSHOT_KEY, snapshot, _SNAPSHOT_TTL)
-    _cache.set_ex(_STATUS_KEY,   {"state": "ok"}, _SNAPSHOT_TTL)
+    if not _cache.set_ex(_SNAPSHOT_KEY, snapshot, _SNAPSHOT_TTL):
+        logger.error(
+            f"radar_poller: FAILED to write {_SNAPSHOT_KEY} "
+            f"({len(radar_rows)} rows) — Redis write returned False; /radar will be empty"
+        )
+    status = (
+        {"state": "degraded", "reason": "all_symbols_missing"}
+        if all_missing else {"state": "ok"}
+    )
+    _cache.set_ex(_STATUS_KEY, status, _SNAPSHOT_TTL)
 
     frozen = sum(1 for r in tracker.ranges.values() if r["materialized"] is not None)
     logger.info(
@@ -467,6 +489,17 @@ def _poll_cycle(
 def main() -> None:
     setup_logger(settings.log_level)
     logger.info("radar_poller: starting up")
+
+    # Redis is the only sink for the snapshot the /radar page reads. If the client
+    # failed to connect at import (e.g. wrong REDIS_HOST on the host), set_ex would
+    # silently no-op and we'd loop forever logging "snapshot written" while writing
+    # nothing. Fail fast instead — mirror the universe guard below.
+    if _cache._CLIENT is None:
+        logger.error(
+            "radar_poller: Redis unavailable — snapshots cannot be written; "
+            "check REDIS_HOST and that premarket-redis-1 is reachable; exiting"
+        )
+        sys.exit(1)
 
     universe = get_universe()
     if not universe:

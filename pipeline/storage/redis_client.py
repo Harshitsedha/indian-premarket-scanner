@@ -38,14 +38,21 @@ def get(key: str) -> Any | None:
         return None
 
 
-def set_ex(key: str, value: Any, ttl: int = 60) -> None:
-    """Cache JSON-serialisable value with a TTL in seconds. Silent on error."""
+def set_ex(key: str, value: Any, ttl: int = 60) -> bool:
+    """
+    Cache JSON-serialisable value with a TTL in seconds.
+    Returns True if the write reached Redis, False if Redis is unavailable or the
+    write errored. Callers that treat a write as primary (not best-effort cache)
+    should check the return and surface a failure loudly.
+    """
     if _CLIENT is None:
-        return
+        return False
     try:
         _CLIENT.setex(key, ttl, json.dumps(value))
+        return True
     except Exception as exc:
-        logger.debug(f"Redis set({key!r}, ttl={ttl}) failed: {exc}")
+        logger.warning(f"Redis set({key!r}, ttl={ttl}) failed: {exc}")
+        return False
 
 
 def rpush_json_many(items: dict[str, Any], ttl: int) -> None:
