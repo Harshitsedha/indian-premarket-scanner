@@ -133,6 +133,38 @@ def delete_pattern(pattern: str) -> int:
         return 0
 
 
+# Edge-page data spine: durable per-frame transport to the persist worker.
+# One stream entry == one full poll frame (~199 symbols) serialized as JSON.
+# Capped at MAXLEN ~ 10000 (approximate trimming): one frame is ~40-60KB, so 10k
+# entries bound the worst-case Redis footprint near ~500MB while still buffering
+# ~20 trading sessions (~500 frames/session) against a dead persist worker.
+# (MAXLEN 50000 would risk ~2-3GB and could OOM the VPS — do not raise this.)
+_FRAMES_MAXLEN = 10_000
+
+
+def xadd_frame(stream: str, frame: Any) -> bool:
+    """
+    Append one full radar frame to a capped Redis Stream for the persist worker.
+
+    Fire-and-forget: returns True on success, False (logged) on any error or when
+    Redis is unavailable. NEVER raises — the live poll loop must be unaffected if
+    persistence transport fails (the live snapshot the UI reads is written separately).
+    """
+    if _CLIENT is None:
+        return False
+    try:
+        _CLIENT.xadd(
+            stream,
+            {"frame": json.dumps(frame)},
+            maxlen=_FRAMES_MAXLEN,
+            approximate=True,
+        )
+        return True
+    except Exception as exc:
+        logger.warning(f"xadd_frame({stream!r}) failed (non-fatal, frame not persisted): {exc}")
+        return False
+
+
 def setnx_ex(key: str, ttl: int) -> bool:
     """
     Set key with TTL only if it does not already exist.
