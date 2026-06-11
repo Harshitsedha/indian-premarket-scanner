@@ -68,10 +68,11 @@ jobs:
               sudo /usr/bin/systemctl restart premarket-api
               sudo /usr/bin/systemctl restart premarket-scheduler
               sudo /usr/bin/systemctl restart backtest-worker
-              # radar-poller restart is best-effort: if sudoers does not yet
-              # whitelist this unit the deploy must not fail — restart manually.
-              sudo /usr/bin/systemctl restart radar-poller \
-                || echo "WARN: radar-poller restart failed (sudoers?) — restart it manually"
+              # radar-poller and backtest-worker do NOT match a premarket-* glob, so they
+              # must be listed explicitly here AND whitelisted in /etc/sudoers.d/premarket.
+              # Hard-fail (no || echo) so a denied restart fails the deploy loudly instead
+              # of silently leaving the poller on old code (root cause of the 0-of-0 outage).
+              sudo /usr/bin/systemctl restart radar-poller
               echo "premarket-api + premarket-scheduler + backtest-worker + radar-poller restarted"
             fi
 

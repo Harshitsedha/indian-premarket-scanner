@@ -242,9 +242,6 @@ def _get_full_quotes(http: httpx.Client, instrument_keys: list[str]) -> dict | N
         return None
 
     raw = body.get("data", {})
-    # TEMP DIAGNOSTIC (remove with the :410 resolver fix): log the literal key shape
-    # Upstox returns so we match the resolver to the real response, not a guess.
-    logger.info(f"radar_poller: quote_data sample keys = {list(raw.keys())[:5]}")
     # Upstox may return pipe-encoded keys (%7C) or literal pipe (|) — normalise to pipe.
     return {k.replace("%7C", "|").replace("%7c", "|"): v for k, v in raw.items()}
 
@@ -410,7 +407,13 @@ def _poll_cycle(
     missing = 0
 
     for ikey, (symbol, membership) in key_to_meta.items():
-        entry = quote_data.get(ikey)
+        # Upstox /market-quote/quotes is currently keyed by exchange:tradingsymbol
+        # (e.g. NSE_EQ:JINDALSTEL); older v2 responses keyed by the instrument_key.
+        # Try the live format first, fall back to instrument_key so the resolver
+        # survives either shape. Exchange is parsed from the instrument_key (segment
+        # before '|') so BSE/other segments resolve without hardcoding NSE_EQ.
+        exchange = ikey.split("|", 1)[0]
+        entry = quote_data.get(f"{exchange}:{symbol}") or quote_data.get(ikey)
         if not entry:
             missing += 1
             continue
