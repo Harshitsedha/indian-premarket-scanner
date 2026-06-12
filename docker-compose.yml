@@ -2,7 +2,12 @@ version: "3.9"
 
 services:
   postgres:
-    image: postgres:16-alpine
+    # TimescaleDB on PG16 (Alpine/musl — matches the prior postgres:16-alpine libc, so
+    # the reused postgres_data volume keeps its index collations). Pinned, never
+    # latest-pg16. NOTE: reusing an existing volume does NOT auto-set
+    # shared_preload_libraries — see docs/EDGE_PHASE0_RUNBOOK.md (step 3) for the
+    # one-time postgresql.conf change required before CREATE EXTENSION timescaledb.
+    image: timescale/timescaledb:2.17.2-pg16
     restart: always
     environment:
       POSTGRES_USER: ${POSTGRES_USER}

@@ -56,6 +56,7 @@ _DEFS_REFRESH_SECS = 300    # reload OR range defs every 5 min
 
 _SNAPSHOT_KEY   = "radar:snapshot"
 _STATUS_KEY     = "radar:status"
+_FRAMES_STREAM  = "radar:frames"   # Edge-page persist worker consumes this (one entry per cycle)
 _DAY_META_KEY_PREFIX = "radar:day_meta:"
 _NEWS_KEY_PREFIX = "radar:news:"
 
@@ -468,6 +469,13 @@ def _poll_cycle(
             f"radar_poller: FAILED to write {_SNAPSHOT_KEY} "
             f"({len(radar_rows)} rows) — Redis write returned False; /radar will be empty"
         )
+
+    # Edge-page data spine (Phase 0): publish the full frame to the radar:frames
+    # stream for the out-of-process persist worker. Fire-and-forget — xadd_frame
+    # swallows and logs any error so a transport failure can never delay or break
+    # this poll loop. The poller has ZERO Postgres dependency for persistence; the
+    # live snapshot above is the only sink the /radar UI reads.
+    _cache.xadd_frame(_FRAMES_STREAM, snapshot)
     status = (
         {"state": "degraded", "reason": "all_symbols_missing"}
         if all_missing else {"state": "ok"}

@@ -1,0 +1,19 @@
+[Unit]
+Description=PreMarket Pro — Edge Persist Worker (radar:frames -> TimescaleDB)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/premarket/pipeline
+ExecStart=/opt/premarket/pipeline/.venv/bin/python realtime/persist_worker.py
+Restart=on-failure
+RestartSec=10s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=persist-worker
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
