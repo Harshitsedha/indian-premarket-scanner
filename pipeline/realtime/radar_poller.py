@@ -544,8 +544,15 @@ def main() -> None:
     alert_rules = load_rules()
     logger.info(f"radar_poller: {len(alert_rules)} alert rules loaded")
 
+    # Baselines are written by the 08:45 IST job, but the poller may have started (or
+    # rolled the date over at midnight) before then, loading 0 rows — which leaves RVOL
+    # and ATR null for the whole session until an incidental restart. Reload on the
+    # closed->open transition, with a retry-while-empty safety net (see open branch).
+    was_open = False
+
     while True:
         if not _is_market_open():
+            was_open = False
             logger.debug("radar_poller: outside market hours — sleeping 60s")
             time.sleep(60)
             new_date = date.today().isoformat()
@@ -562,6 +569,25 @@ def main() -> None:
                     f"reloaded baselines ({len(baselines)} rows)"
                 )
             continue
+
+        # Closed->open transition: reload baselines (the 08:45 IST job has run by now),
+        # then keep retrying while empty so a late or just-completed baseline set still
+        # populates mid-session — instead of leaving RVOL/ATR null until the next restart.
+        if not was_open:
+            baselines = _load_baselines(trade_date)
+            logger.info(
+                f"radar_poller: market open — reloaded baselines "
+                f"({len(baselines)} rows) for {trade_date}"
+            )
+            was_open = True
+        elif not baselines:
+            reloaded = _load_baselines(trade_date)
+            if reloaded:
+                baselines = reloaded
+                logger.info(
+                    f"radar_poller: baselines now available — "
+                    f"{len(reloaded)} rows for {trade_date}"
+                )
 
         # D: hourly news cache refresh
         if time.monotonic() - news_loaded_at > _NEWS_REFRESH_SECS:
