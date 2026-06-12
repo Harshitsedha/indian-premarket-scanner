@@ -104,7 +104,12 @@ def _connect_db():
 def _connect_redis() -> "redis_lib.Redis":
     return redis_lib.Redis(
         host=settings.redis_host, port=settings.redis_port,
-        decode_responses=True, socket_connect_timeout=5,
+        decode_responses=True,
+        socket_connect_timeout=5,
+        # redis-py 8.0 defaults socket_timeout to 5s. A blocking XREADGROUP holds the
+        # socket for the full BLOCK interval, so socket_timeout MUST exceed
+        # _BLOCK_MS/1000 or every empty read raises TimeoutError. Keep margin above it.
+        socket_timeout=_BLOCK_MS / 1000 + 5,   # 10s > 5s block — never trips on an empty read
     )
 
 
@@ -233,6 +238,27 @@ def _claim_orphans(conn, r: "redis_lib.Redis") -> int:
     return persisted
 
 
+def _cleanup_stale_consumers(r: "redis_lib.Redis") -> None:
+    """
+    Delete dead per-PID consumers left in the group by previous restarts. Each restart
+    gets a new consumer name (hostname-pid), so without this the group accumulates one
+    idle consumer per restart. Only consumers other than us with ZERO pending are
+    removed — any still-pending entries belong to a crashed consumer and must be
+    reclaimed by _claim_orphans first (call this AFTER a claim sweep), never dropped.
+    """
+    try:
+        removed = 0
+        for c in r.xinfo_consumers(_STREAM, _GROUP):
+            name = c.get("name")
+            if name != _CONSUMER and int(c.get("pending", 0)) == 0:
+                r.xgroup_delconsumer(_STREAM, _GROUP, name)
+                removed += 1
+        if removed:
+            logger.info(f"persist_worker: cleaned up {removed} stale consumer(s) from group {_GROUP!r}")
+    except redis_lib.RedisError as exc:
+        logger.warning(f"persist_worker: stale-consumer cleanup skipped ({exc})")
+
+
 # ── main loop ────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -257,6 +283,7 @@ def main() -> None:
     # unacked frame is left behind.
     check_backlog = True
     last_id = "0-0"
+    cleaned_consumers = False   # one-time stale-consumer sweep, after the first claim
 
     while True:
         # (Re)establish the DB connection with capped exponential backoff. While the
@@ -281,6 +308,12 @@ def main() -> None:
         try:
             # Sweep any orphaned pending (crashed prior consumer) before normal reads.
             _claim_orphans(conn, r)
+
+            # One-time: now that orphaned pending has been reclaimed to us, drop the
+            # dead per-PID consumers prior restarts left behind (all now at 0 pending).
+            if not cleaned_consumers:
+                _cleanup_stale_consumers(r)
+                cleaned_consumers = True
 
             stream_id = last_id if check_backlog else ">"
             resp = r.xreadgroup(
@@ -325,6 +358,21 @@ def main() -> None:
             # Re-read our own pending next iteration so the failed frame retries promptly.
             check_backlog = True
             last_id = "0-0"
+            time.sleep(backoff)
+            backoff = min(backoff * 2, _BACKOFF_CAP)
+
+        except redis_lib.TimeoutError:
+            # A blocking read returned no data within the socket window — a normal idle
+            # tick, NOT a failure. Deliberately leave check_backlog and last_id untouched:
+            # a timeout is not proof the backlog is drained (only a real empty *response*
+            # is, handled above), and last_id must be preserved so a mid-backlog timeout
+            # resumes the pending scan from where it left off rather than re-scanning from
+            # 0 or prematurely switching to '>'. The empty-response branch is the SOLE
+            # place that transitions backlog (0) -> live ('>').
+            continue
+
+        except redis_lib.ConnectionError as exc:
+            logger.error(f"persist_worker: Redis connection lost ({exc}); retrying in {backoff:.0f}s")
             time.sleep(backoff)
             backoff = min(backoff * 2, _BACKOFF_CAP)
 
