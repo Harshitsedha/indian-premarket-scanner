@@ -20,7 +20,7 @@ Processing order per bar i:
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
@@ -52,6 +52,9 @@ class ClosedTrade:
     mfe_pct:      float  # max favourable excursion from entry, %
     mae_pct:      float  # max adverse excursion from entry, % (negative = worse)
     exit_reason:  str
+    # Decision-time indicator snapshot, copied verbatim from the entry Signal.
+    # Strategy-defined keys; empty for strategies that record nothing.
+    context:      dict = field(default_factory=dict)
 
 
 # ── Internal position state ───────────────────────────────────────────────────
@@ -65,6 +68,7 @@ class _OpenPosition:
     target_price:  float
     gap_pct:       float
     side:          str = "LONG"
+    context:       dict = field(default_factory=dict)
 
 
 # ── Engine ────────────────────────────────────────────────────────────────────
@@ -118,6 +122,7 @@ def run(
             mfe_pct     = round(mfe_pct, 4),
             mae_pct     = round(mae_pct, 4),
             exit_reason = reason,
+            context     = dict(position.context),
         ))
         logger.debug(
             f"{symbol} CLOSE {reason}: entry={ep:.2f} exit={exit_price:.2f} "
@@ -153,6 +158,9 @@ def run(
                     stop_price    = stop,
                     target_price  = target,
                     gap_pct       = pending.gap_pct,
+                    # Snapshot from the decision bar, frozen at fill. Copied so
+                    # later strategy state changes can't mutate it.
+                    context       = dict(pending.context),
                 )
                 logger.debug(
                     f"{symbol} FILL {fill:.2f} stop={stop:.2f} "
