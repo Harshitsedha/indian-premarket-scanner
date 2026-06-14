@@ -33,6 +33,10 @@ class Signal:
     target_r:    float        = 2.0    # risk multiple for target (engine applies after fill)
     gap_pct:     float        = 0.0    # passed through to trade record
     reason:      str          = ""
+    # Arbitrary indicator snapshot captured at decision time (bar i, on_bar).
+    # Keys vary per strategy. The engine copies this verbatim onto the trade
+    # record and NEVER recomputes it — so values are a pure pre-entry snapshot.
+    context:     dict         = field(default_factory=dict)
 
 
 # ── Context ───────────────────────────────────────────────────────────────────

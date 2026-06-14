@@ -78,6 +78,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # Single-symbol only
     p.add_argument("--out", default=None, help="Override output CSV path (single mode)")
 
+    # Optional per-trade context columns (both modes). Off by default to keep
+    # the standard report at the canonical column set.
+    p.add_argument("--context-cols", action="store_true", dest="context_cols",
+                   help="Append unioned per-trade Signal.context keys as extra CSV columns")
+
     # Corporate-action guard (both modes)
     p.add_argument("--ca-jump-pct", type=float, default=20.0, dest="ca_jump_pct",
                    help="Flag transitions with |jump| > this %% (default 20.0)")
@@ -176,7 +181,7 @@ def _run_single(args: argparse.Namespace) -> None:
         out_path = Path(args.out)
     else:
         out_path = _RESULTS_DIR / f"{symbol}_{args.strategy}_{run_ts}.csv"
-    write_csv(trades, out_path)
+    write_csv(trades, out_path, context_cols=args.context_cols)
 
     summary = compute_summary(trades)
     label   = f"{symbol} | {args.strategy} | {start} to {end} | {interval}"
@@ -328,7 +333,7 @@ def _run_multi(args: argparse.Namespace) -> None:
         return
 
     combined_path = _RESULTS_DIR / f"multi_{args.strategy}_{start}_{end}_{run_ts}.csv"
-    write_csv(all_trades, combined_path)
+    write_csv(all_trades, combined_path, context_cols=args.context_cols)
     print(f"\nCombined CSV: {len(all_trades)} trades  ->  {combined_path.name}")
 
     summary = compute_summary(all_trades)
@@ -361,6 +366,7 @@ def run_single(
     strict_ca:       bool  = False,
     features:        str | None  = None,
     strategy_params: dict | None = None,
+    context_cols:    bool  = False,
     cancel_event     = None,      # threading.Event | None; omit outside worker context
 ) -> tuple[str, dict]:
     """
@@ -421,7 +427,7 @@ def run_single(
         trades = engine_run(candles, strategy_obj, symbol)
         path   = _RESULTS_DIR / f"{symbol}_{strategy}_{run_ts}.csv"
         if trades:
-            write_csv(trades, path)
+            write_csv(trades, path, context_cols=context_cols)
         raw = compute_summary(trades)
         summary = {"mode": "run", **_safe_summary(raw)}
 
@@ -438,6 +444,7 @@ def run_multi(
     ca_ack:          bool  = True,
     features:        str | None  = None,
     strategy_params: dict | None = None,
+    context_cols:    bool  = False,
     cancel_event     = None,      # threading.Event | None; omit outside worker context
 ) -> tuple[str, dict]:
     """
@@ -553,7 +560,7 @@ def run_multi(
     else:
         path = _RESULTS_DIR / f"multi_{strategy}_{start}_{end}_{run_ts}.csv"
         if all_trades:
-            write_csv(all_trades, path)
+            write_csv(all_trades, path, context_cols=context_cols)
         raw = compute_summary(all_trades)
         summary = {"mode": "run", **_safe_summary(raw)}
 
