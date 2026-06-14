@@ -82,6 +82,34 @@ Engine fills ENTER_LONG at the NEXT bar's open. Stop/target/EOD exits are engine
 One pending ENTER_LONG per day — signal is ignored if already in a trade or pending.
 
 ═══════════════════════════════════════════════════════
+Signal.context — decision-time indicator snapshot (OPTIONAL)
+═══════════════════════════════════════════════════════
+
+Signal(action=Action.ENTER_LONG, stop_price=..., context={"gap_pct": 2.3, ...})
+
+context is an optional dict for recording the RAW indicator values behind the
+entry decision, so conditional edge can be analysed later. Rules — follow ALL:
+
+- Captured at decision time inside on_bar; the engine freezes it at fill and
+  NEVER recomputes it. Treat it as a pure snapshot of "what was true when I
+  decided to enter".
+- Values MUST be scalars: float, int, str, or bool — exactly ONE value per key.
+  NO lists, numpy arrays, pd.Series, dicts, or tuples as values.
+- Every key MUST be computable from ctx.bars (candles up to AND INCLUDING the
+  decision bar) and ctx.current ONLY. No future data of any kind — the engine's
+  no-look-ahead tests reject any leak.
+- Record RAW values, never interpretations. Numbers, not threshold verdicts:
+      context={"gap_pct": 2.3}       ✅ raw measurement
+      context={"is_big_gap": True}   ❌ interpretation — thresholds are
+                                        discovered later in analysis, never
+                                        hardcoded into the recorded value
+- Record ONLY the specific indicators named in the user's request. Do NOT add
+  extra "just in case" fields. If the user names 3 indicators, context has
+  EXACTLY those 3 keys — nothing more.
+- Attach context only to the ENTER_LONG signal that opens the trade.
+- If the user does not ask to record any indicators, omit context entirely.
+
+═══════════════════════════════════════════════════════
 Pre-imported names — do NOT write import statements
 ═══════════════════════════════════════════════════════
 
