@@ -52,7 +52,17 @@ from backtest.metrics import compute_summary, print_summary, write_summary
 from backtest.record import run_and_record, write_candidates
 from backtest.recorder import _RESULTS_DIR, write_csv
 from backtest.loader import load_strategy
-from ingestion.upstox_instruments import get_instrument_token
+from ingestion.upstox_instruments import get_index_token, get_instrument_token
+
+
+def _resolve_symbol_key(symbol: str) -> str | None:
+    """Resolve a single-symbol backtest ticker to an Upstox instrument key.
+
+    Equities first (preserves existing behavior), then NSE indices, so tickers
+    like NIFTY / BANKNIFTY work in single-symbol mode. Multi-mode stays
+    equity-only and does NOT use this — SCAN_WATCHLIST is the equity universe.
+    """
+    return get_instrument_token(symbol) or get_index_token(symbol)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -127,7 +137,7 @@ def _run_single(args: argparse.Namespace) -> None:
     end      = date.fromisoformat(args.end)
     interval = args.interval
 
-    instrument_key = get_instrument_token(symbol)
+    instrument_key = _resolve_symbol_key(symbol)
     if not instrument_key:
         logger.error(f"Symbol not found in instrument master: {symbol}")
         sys.exit(1)
@@ -389,7 +399,7 @@ def run_single(
     start_d = date.fromisoformat(start)
     end_d   = date.fromisoformat(end)
 
-    instrument_key = get_instrument_token(symbol)
+    instrument_key = _resolve_symbol_key(symbol)
     if not instrument_key:
         raise ValueError(f"Symbol not found in instrument master: {symbol}")
 

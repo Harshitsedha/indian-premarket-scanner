@@ -103,6 +103,10 @@ entry decision, so conditional edge can be analysed later. Rules — follow ALL:
       context={"is_big_gap": True}   ❌ interpretation — thresholds are
                                         discovered later in analysis, never
                                         hardcoded into the recorded value
+- Volume-based context fields (rvol, volume ratios, turnover, etc.) MUST record
+  None when volume is zero or absent — NSE indices report volume=0, so an rvol
+  there is meaningless. Emit None (the honest "not available"), NEVER a
+  fabricated constant like 1.0. Analysis filters None; it cannot un-fake a 1.0.
 - Record ONLY the specific indicators named in the user's request. Do NOT add
   extra "just in case" fields. If the user names 3 indicators, context has
   EXACTLY those 3 keys — nothing more.
