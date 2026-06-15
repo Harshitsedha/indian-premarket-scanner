@@ -23,6 +23,7 @@ _CSV_PATH = Path(__file__).resolve().parents[2] / "data" / "instruments" / "NSE_
 _STALE_AFTER = timedelta(days=7)
 
 _cache: dict[str, str] | None = None
+_index_cache: dict[str, str] | None = None
 
 
 # ── Download ─────────────────────────────────────────────────────────────────
@@ -49,6 +50,17 @@ def _build_cache() -> dict[str, str]:
     return cache
 
 
+def _build_index_cache() -> dict[str, str]:
+    df = pd.read_csv(_CSV_PATH, low_memory=False)
+    # NSE indices live in the same CSV under exchange=NSE_INDEX / type=INDEX.
+    nse_index = df[(df["exchange"] == "NSE_INDEX") & (df["instrument_type"] == "INDEX")]
+    # tradingsymbol is the convenient ticker (NIFTY, BANKNIFTY); instrument_key
+    # is the API-ready value (e.g. "NSE_INDEX|Nifty 50").
+    cache = dict(zip(nse_index["tradingsymbol"], nse_index["instrument_key"]))
+    logger.info(f"Index cache built: {len(cache):,} NSE_INDEX indices")
+    return cache
+
+
 def _is_stale() -> bool:
     if not _CSV_PATH.exists():
         return True
@@ -67,6 +79,15 @@ def _ensure_loaded() -> None:
     _cache = _build_cache()
 
 
+def _ensure_index_loaded() -> None:
+    global _index_cache
+    if _index_cache is not None:
+        return
+    if _is_stale():
+        _download()
+    _index_cache = _build_index_cache()
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def get_instrument_token(symbol: str) -> str | None:
@@ -75,8 +96,20 @@ def get_instrument_token(symbol: str) -> str | None:
     return _cache.get(symbol.upper())
 
 
+def get_index_token(symbol: str) -> str | None:
+    """Return the NSE_INDEX instrument key (e.g. 'NSE_INDEX|Nifty 50') or None.
+
+    Separate from get_instrument_token on purpose: the equity cache feeds the
+    live radar/poller and universe building, so indices are kept in their own
+    cache to avoid polluting those paths.
+    """
+    _ensure_index_loaded()
+    return _index_cache.get(symbol.upper())
+
+
 def refresh_instrument_master() -> None:
     """Force-download the CSV and rebuild the in-memory cache. Called by scheduler."""
-    global _cache
+    global _cache, _index_cache
     _download()
     _cache = _build_cache()
+    _index_cache = _build_index_cache()

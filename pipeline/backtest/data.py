@@ -213,7 +213,7 @@ def get_candles(
         .reset_index(drop=True)
     )
     df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
-    df["volume"] = df["volume"].astype(int)
+    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype(int)
     df["oi"]     = pd.to_numeric(df["oi"], errors="coerce").fillna(0.0)
 
     # Persist raw columns only; 'date' is cheap to recompute and avoids parquet
