@@ -3,7 +3,9 @@ APScheduler-based scheduler for the PreMarket Pro pipeline.
 
 Jobs (IST):
   08:45 Mon-Fri  morning_briefing          — full pipeline: scrape, analyse, save, notify, healthcheck
+  */5  09-16 M-F event_labeler             — forward-return labeling (T+5/15/30 backfill + eod)
   15:35 Mon-Fri  orb_eod                   — persist ORB range outcomes, clean Redis
+  15:40 Mon-Fri  event_labeler_eod         — forward-return labeler EOD pass (eod horizon)
   15:45 Mon-Fri  outcome_fetcher           — EOD outcome fetch (10:15 UTC)
   16:00 Fri      edge_analyser             — weekly edge pattern analysis (10:30 UTC Fri)
   05:00 Mon      instrument_master_refresh — NSE instrument master weekly refresh (23:30 UTC Sun)
@@ -37,6 +39,7 @@ from ingestion.upstox_instruments import refresh_instrument_master
 from processing.outcome_fetcher import fetch_and_log_outcomes
 from processing.edge_analyser import run_edge_analysis
 from processing.orb_eod import run_orb_eod
+from processing.event_labeler import run_event_labeler
 
 
 # ── failure alert ─────────────────────────────────────────────────────────────
@@ -115,6 +118,17 @@ async def orb_eod_job() -> None:
         await _send_failure_alert(exc)
 
 
+async def event_labeler_job() -> None:
+    logger.info("Job [event_labeler] starting")
+    try:
+        loop = asyncio.get_running_loop()
+        summary = await loop.run_in_executor(None, run_event_labeler)
+        logger.info(f"Job [event_labeler] done — {summary}")
+    except Exception as exc:
+        logger.error(f"Job [event_labeler] FAILED: {exc}")
+        await _send_failure_alert(exc)
+
+
 async def instrument_master_refresh_job() -> None:
     logger.info("Job [instrument_master_refresh] starting")
     try:
@@ -145,6 +159,31 @@ async def main() -> None:
         CronTrigger(hour=15, minute=35, day_of_week="mon-fri", timezone="Asia/Kolkata"),
         id="orb_eod",
         name="ORB range EOD persistence",
+        misfire_grace_time=600,
+        coalesce=True,
+        max_instances=1,
+        replace_existing=True,
+    )
+    # Phase 1 forward-return labeler. Runs every 5 min across market hours so T+5/15/30
+    # backfill as each window matures (T+5 lands within ~6 min of an event); the same job
+    # writes the eod horizon once 15:30 IST has passed. Idempotent — overlapping runs only
+    # re-attempt missing/matured horizons. The dedicated 15:40 pass below is belt-and-
+    # suspenders for the eod horizon after the last frames settle.
+    scheduler.add_job(
+        event_labeler_job,
+        CronTrigger(minute="*/5", hour="9-16", day_of_week="mon-fri", timezone="Asia/Kolkata"),
+        id="event_labeler",
+        name="Forward-return labeler (intraday backfill)",
+        misfire_grace_time=120,
+        coalesce=True,
+        max_instances=1,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        event_labeler_job,
+        CronTrigger(hour=15, minute=40, day_of_week="mon-fri", timezone="Asia/Kolkata"),
+        id="event_labeler_eod",
+        name="Forward-return labeler (EOD pass)",
         misfire_grace_time=600,
         coalesce=True,
         max_instances=1,
