@@ -41,6 +41,7 @@ from ingestion.universe import get_universe
 from ingestion.upstox_client import _get_bearer_token
 import storage.redis_client as _cache
 from realtime.radar_alerts import load_rules, process_alerts
+from realtime.radar_events import process_events
 from realtime.orb_ranges import RangeTracker, load_range_defs
 
 
@@ -57,6 +58,7 @@ _DEFS_REFRESH_SECS = 300    # reload OR range defs every 5 min
 _SNAPSHOT_KEY   = "radar:snapshot"
 _STATUS_KEY     = "radar:status"
 _FRAMES_STREAM  = "radar:frames"   # Edge-page persist worker consumes this (one entry per cycle)
+_EVENTS_STREAM  = "radar:events"   # Phase 1 events — same worker, one entry per detected event
 _DAY_META_KEY_PREFIX = "radar:day_meta:"
 _NEWS_KEY_PREFIX = "radar:news:"
 
@@ -460,8 +462,12 @@ def _poll_cycle(
             f"— 0 rows written; likely a quote key-format mismatch at the :410 lookup"
         )
 
+    # One timestamp shared by the live snapshot, the persisted frame, AND any events
+    # emitted this cycle — so an event's ts is byte-identical to the radar_snapshots
+    # row the worker writes, which the labeler relies on for entry-price alignment.
+    generated_at = datetime.now(IST).isoformat()
     snapshot = {
-        "generated_at": datetime.now(IST).isoformat(),
+        "generated_at": generated_at,
         "rows":         radar_rows,
     }
     if not _cache.set_ex(_SNAPSHOT_KEY, snapshot, _SNAPSHOT_TTL):
@@ -491,6 +497,12 @@ def _poll_cycle(
 
     # C: Telegram alerts (after snapshot is written so stale=False)
     process_alerts(radar_rows, alert_rules, trade_date, market_open=True, stale=False)
+
+    # C2: Phase 1 event emission — same enriched rows, separate path from alert
+    # throttling. First-crossing only (own Redis dedup keyspace); each event is one
+    # fire-and-forget XADD to radar:events. No synchronous DB write here, so Phase 0
+    # isolation is preserved exactly as for frames.
+    process_events(radar_rows, alert_rules, trade_date, generated_at)
 
     return True
 

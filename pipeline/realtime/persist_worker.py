@@ -5,6 +5,12 @@ Consumes the ``radar:frames`` Redis Stream (one entry per 45s poll cycle, each e
 full ~199-symbol frame serialized as JSON) and batch-inserts every row into the
 TimescaleDB ``radar_snapshots`` hypertable.
 
+Phase 1 adds a SECOND stream, ``radar:events`` (one entry per detected event), drained by
+the same process and consumer group into ``radar_events``. Events ride a deliberately
+lighter path: orphan recovery (XAUTOCLAIM) still guarantees no loss, but events do not
+participate in the ordered backlog replay that frames use — order is irrelevant for events
+and each is a self-contained single-row insert, so the proven frames path is untouched.
+
 Fully isolated from live serving:
   * the radar poller never writes to Postgres — it only XADDs to radar:frames;
   * this worker never touches the live ``radar:snapshot`` key the /radar UI reads.
@@ -57,6 +63,12 @@ from utils.logger import setup_logger
 
 # ── constants ───────────────────────────────────────────────────────────────────
 _STREAM   = "radar:frames"
+# Phase 1 events ride the SAME process and consumer group on a second stream. They are
+# drained on a deliberately LIGHTER path than frames: orphan recovery (XAUTOCLAIM) still
+# applies so nothing is lost, but events do NOT participate in the ordered backlog
+# (check_backlog / last_id) replay — order is irrelevant for events and each entry is a
+# single self-contained row, so the proven frames replay logic is left entirely untouched.
+_EVENTS_STREAM = "radar:events"
 _GROUP    = "persist"
 # Per-process consumer name. A restart gets a new name; the previous name's pending
 # entries are recovered by XAUTOCLAIM (which reclaims across the whole group PEL).
@@ -86,6 +98,18 @@ _INSERT_SQL = (
     f"ON CONFLICT (ts, symbol) DO NOTHING"
 )
 
+# Idempotent single-event insert. Bare ON CONFLICT DO NOTHING (no target) deliberately
+# absorbs BOTH unique constraints on radar_events: the event_id PK (a stream redelivery
+# of the same event is a no-op) AND the (symbol, event_type, IST-day) unique index from
+# migration 014 (a second event with a DIFFERENT event_id — e.g. after a mid-session
+# Redis dedup-key flush — is also silently dropped). Naming one arbiter would let the
+# other raise and wedge redelivery, so we name neither.
+_EVENT_INSERT_SQL = (
+    "INSERT INTO radar_events (event_id, ts, symbol, event_type, trigger, regime_id) "
+    "VALUES (%s, %s, %s, %s, %s, %s) "
+    "ON CONFLICT DO NOTHING"
+)
+
 
 # ── connections ──────────────────────────────────────────────────────────────────
 
@@ -113,18 +137,19 @@ def _connect_redis() -> "redis_lib.Redis":
     )
 
 
-def _ensure_group(r: "redis_lib.Redis") -> None:
+def _ensure_group(r: "redis_lib.Redis", stream: str) -> None:
     """
     Create the consumer group at id '0' (+ MKSTREAM) so the very first run drains any
-    frames the poller already buffered before the worker existed. On every subsequent
-    start the group already exists (BUSYGROUP) and this is a no-op.
+    entries the poller already buffered before the worker existed. On every subsequent
+    start the group already exists (BUSYGROUP) and this is a no-op. Called once per
+    stream (radar:frames and radar:events share the one group name).
     """
     try:
-        r.xgroup_create(name=_STREAM, groupname=_GROUP, id="0", mkstream=True)
-        logger.info(f"persist_worker: created consumer group {_GROUP!r} on {_STREAM!r}")
+        r.xgroup_create(name=stream, groupname=_GROUP, id="0", mkstream=True)
+        logger.info(f"persist_worker: created consumer group {_GROUP!r} on {stream!r}")
     except redis_lib.ResponseError as exc:
         if "BUSYGROUP" in str(exc):
-            logger.debug("persist_worker: consumer group already exists")
+            logger.debug(f"persist_worker: consumer group already exists on {stream!r}")
         else:
             raise
 
@@ -197,6 +222,54 @@ def _persist_entry(conn, r: "redis_lib.Redis", entry_id: str, fields: dict) -> i
     return len(rows)
 
 
+def _event_to_row(payload: str) -> tuple | None:
+    """Parse one radar:events entry's JSON into a radar_events column tuple (None if unusable)."""
+    try:
+        event = json.loads(payload)
+    except Exception as exc:
+        logger.error(f"persist_worker: malformed event JSON dropped: {exc}")
+        return None
+
+    event_id = event.get("event_id")
+    ts_raw   = event.get("ts")
+    symbol   = event.get("symbol")
+    if not event_id or not ts_raw or not symbol:
+        logger.error(f"persist_worker: event missing event_id/ts/symbol, dropped: {event!r}")
+        return None
+    try:
+        ts = datetime.fromisoformat(ts_raw)
+    except Exception as exc:
+        logger.error(f"persist_worker: unparseable event ts {ts_raw!r}: {exc}")
+        return None
+
+    return (
+        event_id,
+        ts,
+        symbol,
+        event.get("event_type"),
+        psycopg2.extras.Json(event.get("trigger") or {}),
+        event.get("regime_id"),
+    )
+
+
+def _persist_event_entry(conn, r: "redis_lib.Redis", entry_id: str, fields: dict) -> int:
+    """
+    Insert ONE radar_events row, COMMIT, then XACK on the events stream. Returns 1 if the
+    entry was handled (inserted or a no-op conflict), 0 if malformed. Raises on DB error
+    WITHOUT acking so the entry stays pending and is retried/redelivered. Malformed events
+    are acked (nothing to insert) so they do not redeliver forever.
+    """
+    row = _event_to_row(fields.get("event", ""))
+    if row is None:
+        r.xack(_EVENTS_STREAM, _GROUP, entry_id)
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(_EVENT_INSERT_SQL, row)
+    conn.commit()                              # durability point
+    r.xack(_EVENTS_STREAM, _GROUP, entry_id)   # ack ONLY after the commit
+    return 1
+
+
 # ── health / recovery ────────────────────────────────────────────────────────────
 
 def _stream_lag(r: "redis_lib.Redis") -> int | None:
@@ -211,17 +284,20 @@ def _stream_lag(r: "redis_lib.Redis") -> int | None:
     return None
 
 
-def _claim_orphans(conn, r: "redis_lib.Redis") -> int:
+def _claim_orphans(conn, r: "redis_lib.Redis", stream: str, persist_fn) -> int:
     """
     Reclaim and persist pending entries left by a crashed consumer (XAUTOCLAIM across
-    the whole group PEL). Returns rows persisted. Runs at startup and on idle ticks so
-    a worker that died mid-batch has its in-flight frame redelivered and finished.
+    the whole group PEL) for one stream. Returns the count persisted. Runs at startup and
+    on idle ticks so a worker that died mid-batch has its in-flight entry redelivered and
+    finished. Generic over the stream + per-entry persist function so frames and events
+    share the identical recovery mechanism (frames pass _persist_entry, events
+    _persist_event_entry); the frames behaviour is unchanged from Phase 0.
     """
     persisted = 0
     cursor = "0-0"
     while True:
         res = r.xautoclaim(
-            name=_STREAM, groupname=_GROUP, consumername=_CONSUMER,
+            name=stream, groupname=_GROUP, consumername=_CONSUMER,
             min_idle_time=_CLAIM_MIN_IDLE_MS, start_id=cursor, count=_READ_COUNT,
         )
         # redis-py returns (next_cursor, claimed[, deleted]) — index defensively.
@@ -230,15 +306,18 @@ def _claim_orphans(conn, r: "redis_lib.Redis") -> int:
         if not claimed:
             break
         for entry_id, entry_fields in claimed:
-            persisted += _persist_entry(conn, r, entry_id, entry_fields)
+            persisted += persist_fn(conn, r, entry_id, entry_fields)
         if cursor == "0-0":
             break
     if persisted:
-        logger.info(f"persist_worker: reclaimed + persisted {persisted} row(s) from orphaned frames")
+        logger.info(
+            f"persist_worker: reclaimed + persisted {persisted} item(s) from orphaned "
+            f"entries on {stream!r}"
+        )
     return persisted
 
 
-def _cleanup_stale_consumers(r: "redis_lib.Redis") -> None:
+def _cleanup_stale_consumers(r: "redis_lib.Redis", stream: str) -> None:
     """
     Delete dead per-PID consumers left in the group by previous restarts. Each restart
     gets a new consumer name (hostname-pid), so without this the group accumulates one
@@ -248,15 +327,18 @@ def _cleanup_stale_consumers(r: "redis_lib.Redis") -> None:
     """
     try:
         removed = 0
-        for c in r.xinfo_consumers(_STREAM, _GROUP):
+        for c in r.xinfo_consumers(stream, _GROUP):
             name = c.get("name")
             if name != _CONSUMER and int(c.get("pending", 0)) == 0:
-                r.xgroup_delconsumer(_STREAM, _GROUP, name)
+                r.xgroup_delconsumer(stream, _GROUP, name)
                 removed += 1
         if removed:
-            logger.info(f"persist_worker: cleaned up {removed} stale consumer(s) from group {_GROUP!r}")
+            logger.info(
+                f"persist_worker: cleaned up {removed} stale consumer(s) from "
+                f"group {_GROUP!r} on {stream!r}"
+            )
     except redis_lib.RedisError as exc:
-        logger.warning(f"persist_worker: stale-consumer cleanup skipped ({exc})")
+        logger.warning(f"persist_worker: stale-consumer cleanup skipped on {stream!r} ({exc})")
 
 
 # ── main loop ────────────────────────────────────────────────────────────────────
@@ -274,13 +356,15 @@ def main() -> None:
             f"{settings.redis_host}:{settings.redis_port} ({exc}); exiting"
         )
         sys.exit(1)
-    _ensure_group(r)
+    _ensure_group(r, _STREAM)
+    _ensure_group(r, _EVENTS_STREAM)
 
     conn = None
     backoff = _BACKOFF_BASE
     # After a restart, first re-read our own pending (id '0') before switching to new
     # entries ('>'). Combined with _claim_orphans this guarantees no delivered-but-
-    # unacked frame is left behind.
+    # unacked frame is left behind. (FRAMES ONLY — events do not use this ordered replay;
+    # their orphan recovery is the XAUTOCLAIM sweep below, and live reads use '>'.)
     check_backlog = True
     last_id = "0-0"
     cleaned_consumers = False   # one-time stale-consumer sweep, after the first claim
@@ -306,31 +390,55 @@ def main() -> None:
                 continue
 
         try:
-            # Sweep any orphaned pending (crashed prior consumer) before normal reads.
-            _claim_orphans(conn, r)
+            # Sweep any orphaned pending (crashed prior consumer) before normal reads —
+            # both streams, each with its own persist function.
+            _claim_orphans(conn, r, _STREAM, _persist_entry)
+            _claim_orphans(conn, r, _EVENTS_STREAM, _persist_event_entry)
 
             # One-time: now that orphaned pending has been reclaimed to us, drop the
             # dead per-PID consumers prior restarts left behind (all now at 0 pending).
             if not cleaned_consumers:
-                _cleanup_stale_consumers(r)
+                _cleanup_stale_consumers(r, _STREAM)
+                _cleanup_stale_consumers(r, _EVENTS_STREAM)
                 cleaned_consumers = True
 
+            # Read BOTH streams in one call (one group name spans both, separate PELs).
+            # Frames carry the backlog cursor (ordered replay of our own pending after a
+            # restart); events always read live ('>') — their recovery is the orphan
+            # sweep above, so the proven frames replay path is unchanged.
             stream_id = last_id if check_backlog else ">"
             resp = r.xreadgroup(
                 groupname=_GROUP, consumername=_CONSUMER,
-                streams={_STREAM: stream_id}, count=_READ_COUNT, block=_BLOCK_MS,
+                streams={_STREAM: stream_id, _EVENTS_STREAM: ">"},
+                count=_READ_COUNT, block=_BLOCK_MS,
             )
 
-            if not resp or not resp[0][1]:
-                # No entries: our own pending backlog is drained — switch to live ('>').
+            # Dispatch by stream name — never assume positional order in the response.
+            frame_entries: list = []
+            event_entries: list = []
+            for stream_name, entries in (resp or []):
+                if stream_name == _STREAM:
+                    frame_entries = entries
+                elif stream_name == _EVENTS_STREAM:
+                    event_entries = entries
+
+            # Events first (cheap, single-row inserts), independent of the frames cursor.
+            events_done = 0
+            for entry_id, entry_fields in event_entries:
+                events_done += _persist_event_entry(conn, r, entry_id, entry_fields)
+            if events_done:
+                logger.info(f"persist_worker: persisted {events_done} event(s)")
+
+            if not frame_entries:
+                # No frames: our own pending backlog is drained — switch to live ('>').
+                # (Keyed on the FRAMES stream specifically; events never gate this.)
                 if check_backlog:
                     check_backlog = False
                 continue
 
-            entries = resp[0][1]
             frames = 0
             rows_total = 0
-            for entry_id, entry_fields in entries:
+            for entry_id, entry_fields in frame_entries:
                 rows_total += _persist_entry(conn, r, entry_id, entry_fields)
                 frames += 1
                 if check_backlog:

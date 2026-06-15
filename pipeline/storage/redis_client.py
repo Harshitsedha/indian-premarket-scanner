@@ -165,6 +165,37 @@ def xadd_frame(stream: str, frame: Any) -> bool:
         return False
 
 
+# Phase 1 event spine: one stream entry == one detected event (not one per frame).
+# Event volume is tiny (tens/day vs ~199 rows every 45s on radar:frames), so the cap
+# is far smaller than the frames stream — it only needs to buffer a few sessions of
+# events against a stalled consumer.
+_EVENTS_MAXLEN = 5_000
+
+
+def xadd_event(stream: str, event: Any) -> bool:
+    """
+    Append one detected radar event to a capped Redis Stream for the persist worker.
+
+    Fire-and-forget, identical contract to xadd_frame: returns True on success, False
+    (logged) on any error or when Redis is unavailable, and NEVER raises. The live poll
+    loop must be unaffected if event transport fails — events are a side channel, not on
+    the path of the live snapshot the /radar UI reads.
+    """
+    if _CLIENT is None:
+        return False
+    try:
+        _CLIENT.xadd(
+            stream,
+            {"event": json.dumps(event)},
+            maxlen=_EVENTS_MAXLEN,
+            approximate=True,
+        )
+        return True
+    except Exception as exc:
+        logger.warning(f"xadd_event({stream!r}) failed (non-fatal, event not persisted): {exc}")
+        return False
+
+
 def setnx_ex(key: str, ttl: int) -> bool:
     """
     Set key with TTL only if it does not already exist.
