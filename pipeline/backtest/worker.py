@@ -202,8 +202,13 @@ def _execute(job: dict, cancel_event: threading.Event) -> tuple[str, dict]:
         raise ValueError("record mode job missing 'features' in params")
 
     if "symbol" in params:
+        # Worker output must always carry recorded Signal.context as CSV columns.
+        # Set in params (not as a separate kwarg) to avoid a duplicate-keyword
+        # clash if a job ever supplies its own context_cols.
+        params["context_cols"] = True
         return run_single(cancel_event=cancel_event, **params)
     else:
+        params["context_cols"] = True
         return run_multi(cancel_event=cancel_event, **params)
 
 
