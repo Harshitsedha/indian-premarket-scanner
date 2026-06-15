@@ -29,6 +29,12 @@ from processing.edge_stats import build_stats, query_rows
 from processing.tagging_universe import TAGGING_UNIVERSE_SET
 from backtest.features import FEATURES, parse_features
 from backtest.recorder import _RESULTS_DIR
+
+# NSE indices accepted in the single-symbol run/record backtest path only.
+# Deliberately NOT added to TAGGING_UNIVERSE_SET / tagging_universe.txt, so the
+# radar universe (ingestion.universe._load_tagging_universe) stays byte-identical.
+# Resolution to NSE_INDEX|... happens in run_single via _resolve_symbol_key.
+_BACKTEST_INDEX_SYMBOLS: frozenset[str] = frozenset({"NIFTY", "BANKNIFTY"})
 import storage.redis_client as _cache
 
 app = FastAPI(title="PreMarket Pro API", version="1.0.0")
@@ -764,7 +770,8 @@ def _validate_job(req: CreateJobRequest) -> dict:
 
     if date.fromisoformat(req.start) > date.fromisoformat(req.end):
         raise HTTPException(422, "start must be ≤ end")
-    if req.symbol and req.symbol.upper() not in TAGGING_UNIVERSE_SET:
+    if (req.symbol and req.symbol.upper() not in TAGGING_UNIVERSE_SET
+            and req.symbol.upper() not in _BACKTEST_INDEX_SYMBOLS):
         raise HTTPException(400, f"Unknown symbol '{req.symbol.upper()}' — not in the backtest universe. Select from the autocomplete list.")
 
     if req.mode == "record":
@@ -1056,8 +1063,10 @@ def download_result(job_id: str):
 
 @app.get("/api/backtest/symbols")
 def list_symbols():
-    """Return the ~200-symbol tagging universe for backtest instrument autocomplete."""
-    return [{"symbol": s} for s in sorted(TAGGING_UNIVERSE_SET)]
+    """Tagging universe + the two supported NSE indices, for the single-symbol
+    backtest autocomplete. Indices are appended here only — not in the shared
+    TAGGING_UNIVERSE_SET — so the radar universe is unaffected."""
+    return [{"symbol": s} for s in sorted(TAGGING_UNIVERSE_SET | _BACKTEST_INDEX_SYMBOLS)]
 
 
 # ── GET /api/backtest/features ────────────────────────────────────────────────
