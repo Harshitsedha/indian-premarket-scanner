@@ -498,11 +498,13 @@ def _poll_cycle(
     # C: Telegram alerts (after snapshot is written so stale=False)
     process_alerts(radar_rows, alert_rules, trade_date, market_open=True, stale=False)
 
-    # C2: Phase 1 event emission — same enriched rows, separate path from alert
+    # C2: Phase 1/3 event emission — same enriched rows, separate path from alert
     # throttling. First-crossing only (own Redis dedup keyspace); each event is one
     # fire-and-forget XADD to radar:events. No synchronous DB write here, so Phase 0
-    # isolation is preserved exactly as for frames.
-    process_events(radar_rows, alert_rules, trade_date, generated_at)
+    # isolation is preserved exactly as for frames. tracker.defs() lets the emitter
+    # stamp range_id on per-range ORB events without touching orb_ranges.py / the
+    # frames path (Phase 3 option a).
+    process_events(radar_rows, alert_rules, trade_date, generated_at, tracker.defs())
 
     return True
 

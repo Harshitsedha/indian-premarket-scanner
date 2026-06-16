@@ -54,6 +54,7 @@ _SURFACED_SELECT = """
     e.ts                                   AS ts,
     e.symbol                               AS symbol,
     e.event_type                           AS event_type,
+    e.range_label                          AS range_label,
     e.trigger->>'direction'                AS direction,
     (e.trigger->>'rvol')::float8           AS rvol,
     (e.trigger->>'gap_pct')::float8        AS gap_pct,
@@ -64,7 +65,7 @@ _SURFACED_SELECT = """
 
 # Ordered identity/surfaced column names (drives export column order + JSON shape).
 SURFACED_COLUMNS = [
-    "event_id", "ts", "symbol", "event_type", "direction", "rvol",
+    "event_id", "ts", "symbol", "event_type", "range_label", "direction", "rvol",
     "gap_pct", "atr_multiple", "or_status", "entry_price", "regime_id",
 ]
 
@@ -104,6 +105,7 @@ _SORT_EXPR: dict[str, str] = {
     "ts":           "e.ts",
     "symbol":       "e.symbol",
     "event_type":   "e.event_type",
+    "range_label":  "e.range_label",
     "direction":    "e.trigger->>'direction'",
     "rvol":         "(e.trigger->>'rvol')::float8",
     "gap_pct":      "(e.trigger->>'gap_pct')::float8",
@@ -121,19 +123,21 @@ DEFAULT_SORT = "ts"
 class EdgeFilters:
     """Validated, normalised filter set. All fields optional; absent → no constraint."""
 
-    __slots__ = ("date_from", "date_to", "symbol", "event_type", "direction",
-                 "rvol_min", "gap_min", "gap_max")
+    __slots__ = ("date_from", "date_to", "symbol", "event_type", "range_label",
+                 "direction", "rvol_min", "gap_min", "gap_max")
 
     def __init__(self, *, date_from=None, date_to=None, symbol=None, event_type=None,
-                 direction=None, rvol_min=None, gap_min=None, gap_max=None):
-        self.date_from  = self._parse_date(date_from, "date_from")
-        self.date_to    = self._parse_date(date_to, "date_to")
-        self.symbol     = symbol.upper().strip() if symbol else None
-        self.event_type = event_type.strip() if event_type else None
-        self.direction  = direction.strip() if direction else None
-        self.rvol_min   = rvol_min
-        self.gap_min    = gap_min
-        self.gap_max    = gap_max
+                 range_label=None, direction=None, rvol_min=None, gap_min=None, gap_max=None):
+        self.date_from   = self._parse_date(date_from, "date_from")
+        self.date_to     = self._parse_date(date_to, "date_to")
+        self.symbol      = symbol.upper().strip() if symbol else None
+        self.event_type  = event_type.strip() if event_type else None
+        # Canonical ORB slice key: the OR window string "HH:MM-HH:MM" (not a range name).
+        self.range_label = range_label.strip() if range_label else None
+        self.direction   = direction.strip() if direction else None
+        self.rvol_min    = rvol_min
+        self.gap_min     = gap_min
+        self.gap_max     = gap_max
 
     @staticmethod
     def _parse_date(value, field):
@@ -163,6 +167,9 @@ class EdgeFilters:
         if self.event_type:
             conds.append("e.event_type = %s")
             params.append(self.event_type)
+        if self.range_label:
+            conds.append("e.range_label = %s")
+            params.append(self.range_label)
         if self.direction:
             conds.append("e.trigger->>'direction' = %s")
             params.append(self.direction)
@@ -196,7 +203,7 @@ SELECT {_SURFACED_SELECT},
 FROM radar_events e
 LEFT JOIN event_labels l ON l.event_id = e.event_id
 {where}
-GROUP BY e.event_id, e.ts, e.symbol, e.event_type, e.trigger, e.regime_id
+GROUP BY e.event_id, e.ts, e.symbol, e.event_type, e.range_label, e.trigger, e.regime_id
 {order}
 """
     if limit is not None:
