@@ -64,6 +64,21 @@ def test_symbol_uppercased_and_event_type():
     assert params == ["TATASTEEL", "gap_momentum", "up"]
 
 
+def test_range_label_filter_is_surfaced_and_filterable():
+    # range_label is a first-class surfaced column, sortable, and filterable on the
+    # real radar_events.range_label column (Phase 3 ORB slice key).
+    assert "range_label" in ee.SURFACED_COLUMNS
+    assert "range_label" in ee.SORT_KEYS
+    f = ee.EdgeFilters(range_label="09:45-10:30")
+    clause, params = f.where()
+    assert "e.range_label = %s" in clause
+    assert params == ["09:45-10:30"]
+
+
+def test_range_label_in_export_schema():
+    assert "range_label" in ee.export_columns()
+
+
 def test_numeric_band_filters():
     f = ee.EdgeFilters(rvol_min=2.0, gap_min=1.0, gap_max=5.0)
     clause, params = f.where()

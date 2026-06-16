@@ -15,6 +15,7 @@ type EdgeRow = {
   ts: string;
   symbol: string;
   event_type: string;
+  range_label: string | null;   // OR window that broke ("HH:MM-HH:MM"); null for non-OR events
   direction: string | null;
   rvol: number | null;
   gap_pct: number | null;
@@ -35,12 +36,12 @@ type EdgeResponse = { rows: EdgeRow[]; total: number; limit: number; offset: num
 
 type Filters = {
   dateFrom: string; dateTo: string;
-  symbol: string; eventType: string; direction: string;
+  symbol: string; eventType: string; rangeLabel: string; direction: string;
   rvolMin: string; gapMin: string; gapMax: string;
 };
 
 const EMPTY_FILTERS: Filters = {
-  dateFrom: "", dateTo: "", symbol: "", eventType: "", direction: "",
+  dateFrom: "", dateTo: "", symbol: "", eventType: "", rangeLabel: "", direction: "",
   rvolMin: "", gapMin: "", gapMax: "",
 };
 
@@ -50,7 +51,7 @@ const PAGE_SIZE = 50;
 const EVENT_TYPES = ["orb_break_volume", "gap_momentum", "range_expansion"];
 
 type SortKey =
-  | "ts" | "symbol" | "event_type" | "direction" | "rvol" | "gap_pct"
+  | "ts" | "symbol" | "event_type" | "range_label" | "direction" | "rvol" | "gap_pct"
   | "atr_multiple" | "entry_price"
   | "ret_5m" | "ret_15m" | "ret_30m" | "ret_eod"
   | "mae_5m" | "mae_15m" | "mae_30m" | "mae_eod"
@@ -61,6 +62,7 @@ const COLUMNS: { key: SortKey; label: string; sortable: boolean }[] = [
   { key: "ts",           label: "Time",    sortable: true },
   { key: "symbol",       label: "Symbol",  sortable: true },
   { key: "event_type",   label: "Event",   sortable: true },
+  { key: "range_label",  label: "OR Win",  sortable: true },
   { key: "direction",    label: "Dir",     sortable: true },
   { key: "rvol",         label: "RVOL",    sortable: true },
   { key: "gap_pct",      label: "Gap%",    sortable: true },
@@ -116,9 +118,10 @@ function filtersToParams(f: Filters): URLSearchParams {
   const p = new URLSearchParams();
   if (f.dateFrom)  p.set("date_from", f.dateFrom);
   if (f.dateTo)    p.set("date_to", f.dateTo);
-  if (f.symbol)    p.set("symbol", f.symbol.trim().toUpperCase());
-  if (f.eventType) p.set("event_type", f.eventType);
-  if (f.direction) p.set("direction", f.direction);
+  if (f.symbol)     p.set("symbol", f.symbol.trim().toUpperCase());
+  if (f.eventType)  p.set("event_type", f.eventType);
+  if (f.rangeLabel) p.set("range_label", f.rangeLabel.trim());
+  if (f.direction)  p.set("direction", f.direction);
   if (f.rvolMin)   p.set("rvol_min", f.rvolMin);
   if (f.gapMin)    p.set("gap_min", f.gapMin);
   if (f.gapMax)    p.set("gap_max", f.gapMax);
@@ -239,6 +242,13 @@ export function EdgeEventsTable() {
           </select>
         </label>
         <label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 11, color: "var(--muted)" }}>
+          OR window
+          <input type="text" placeholder="e.g. 09:45-10:30" value={filters.rangeLabel}
+            onChange={e => setF({ rangeLabel: e.target.value })}
+            title="Canonical ORB slice key — the time window, not a range name"
+            style={{ ...inputStyle, width: 110, fontFamily: "monospace" }} />
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 11, color: "var(--muted)" }}>
           Direction
           <select value={filters.direction} onChange={e => setF({ direction: e.target.value })} style={inputStyle}>
             <option value="">All</option>
@@ -302,7 +312,7 @@ export function EdgeEventsTable() {
                     key={col.key}
                     onClick={() => col.sortable && handleSort(col.key)}
                     style={{
-                      padding: "8px 12px", textAlign: col.key === "symbol" || col.key === "event_type" || col.key === "direction" ? "left" : "right",
+                      padding: "8px 12px", textAlign: col.key === "symbol" || col.key === "event_type" || col.key === "range_label" || col.key === "direction" ? "left" : "right",
                       cursor: col.sortable ? "pointer" : "default",
                       color: sort === col.key ? "var(--text)" : "var(--muted)",
                       whiteSpace: "nowrap", userSelect: "none", fontWeight: 500,
@@ -322,6 +332,9 @@ export function EdgeEventsTable() {
                   <td style={{ padding: "7px 12px", whiteSpace: "nowrap", color: "var(--muted)" }}>{fmtTime(row.ts)}</td>
                   <td style={{ padding: "7px 12px", color: "var(--text)", fontWeight: 600 }}>{row.symbol}</td>
                   <td style={{ padding: "7px 12px", color: "var(--muted)", fontSize: 12 }}>{row.event_type}</td>
+                  <td style={{ padding: "7px 12px", fontFamily: "monospace", fontSize: 12, color: row.range_label ? "var(--text)" : "var(--muted)" }}>
+                    {row.range_label ?? <span style={{ opacity: 0.5 }}>—</span>}
+                  </td>
                   <td style={{ padding: "7px 12px" }}><DirBadge d={row.direction} /></td>
                   <td style={{ padding: "7px 12px", textAlign: "right", color: "var(--text)" }}>{fmtNum(row.rvol)}</td>
                   <td style={{ padding: "7px 12px", textAlign: "right", color: "var(--text)" }}>{fmtNum(row.gap_pct)}</td>

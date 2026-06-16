@@ -665,19 +665,20 @@ from processing import edge_events as _edge
 
 
 def _edge_filters(
-    date_from:  str | None,
-    date_to:    str | None,
-    symbol:     str | None,
-    event_type: str | None,
-    direction:  str | None,
-    rvol_min:   float | None,
-    gap_min:    float | None,
-    gap_max:    float | None,
+    date_from:   str | None,
+    date_to:     str | None,
+    symbol:      str | None,
+    event_type:  str | None,
+    range_label: str | None,
+    direction:   str | None,
+    rvol_min:    float | None,
+    gap_min:     float | None,
+    gap_max:     float | None,
 ) -> "_edge.EdgeFilters":
     try:
         return _edge.EdgeFilters(
             date_from=date_from, date_to=date_to, symbol=symbol,
-            event_type=event_type, direction=direction,
+            event_type=event_type, range_label=range_label, direction=direction,
             rvol_min=rvol_min, gap_min=gap_min, gap_max=gap_max,
         )
     except ValueError as exc:
@@ -688,9 +689,10 @@ def _edge_filters(
 def edge_events(
     date_from:  str | None  = Query(default=None),
     date_to:    str | None  = Query(default=None),
-    symbol:     str | None  = Query(default=None),
-    event_type: str | None  = Query(default=None),
-    direction:  str | None  = Query(default=None),
+    symbol:      str | None  = Query(default=None),
+    event_type:  str | None  = Query(default=None),
+    range_label: str | None  = Query(default=None),
+    direction:   str | None  = Query(default=None),
     rvol_min:   float | None = Query(default=None),
     gap_min:    float | None = Query(default=None),
     gap_max:    float | None = Query(default=None),
@@ -703,7 +705,7 @@ def edge_events(
     sort / paginate. Returns {rows, total, limit, offset}."""
     if sort not in _edge.SORT_KEYS:
         raise HTTPException(422, f"Unknown sort {sort!r}. Allowed: {', '.join(_edge.SORT_KEYS)}")
-    filters = _edge_filters(date_from, date_to, symbol, event_type,
+    filters = _edge_filters(date_from, date_to, symbol, event_type, range_label,
                             direction, rvol_min, gap_min, gap_max)
     conn = _db()
     try:
@@ -721,9 +723,10 @@ def edge_events_export(
     fmt:        str         = Query(default="csv", pattern="^(csv|parquet)$"),
     date_from:  str | None  = Query(default=None),
     date_to:    str | None  = Query(default=None),
-    symbol:     str | None  = Query(default=None),
-    event_type: str | None  = Query(default=None),
-    direction:  str | None  = Query(default=None),
+    symbol:      str | None  = Query(default=None),
+    event_type:  str | None  = Query(default=None),
+    range_label: str | None  = Query(default=None),
+    direction:   str | None  = Query(default=None),
     rvol_min:   float | None = Query(default=None),
     gap_min:    float | None = Query(default=None),
     gap_max:    float | None = Query(default=None),
@@ -734,7 +737,7 @@ def edge_events_export(
     filters/sort as the listing; schema = edge_events.export_columns()."""
     if sort not in _edge.SORT_KEYS:
         raise HTTPException(422, f"Unknown sort {sort!r}. Allowed: {', '.join(_edge.SORT_KEYS)}")
-    filters = _edge_filters(date_from, date_to, symbol, event_type,
+    filters = _edge_filters(date_from, date_to, symbol, event_type, range_label,
                             direction, rvol_min, gap_min, gap_max)
     conn = _db()
     try:

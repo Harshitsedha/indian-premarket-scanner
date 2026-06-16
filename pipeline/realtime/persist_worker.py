@@ -105,8 +105,9 @@ _INSERT_SQL = (
 # Redis dedup-key flush — is also silently dropped). Naming one arbiter would let the
 # other raise and wedge redelivery, so we name neither.
 _EVENT_INSERT_SQL = (
-    "INSERT INTO radar_events (event_id, ts, symbol, event_type, trigger, regime_id) "
-    "VALUES (%s, %s, %s, %s, %s, %s) "
+    "INSERT INTO radar_events "
+    "(event_id, ts, symbol, event_type, trigger, regime_id, range_label) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s) "
     "ON CONFLICT DO NOTHING"
 )
 
@@ -242,13 +243,19 @@ def _event_to_row(payload: str) -> tuple | None:
         logger.error(f"persist_worker: unparseable event ts {ts_raw!r}: {exc}")
         return None
 
+    # range_label is the canonical OR-window slice key (Phase 3). It is the single
+    # source read into the real radar_events.range_label column (the unique index keys
+    # on COALESCE(range_label,'')); range_id lives only inside trigger as provenance.
+    # NULL for non-OR events (gap_momentum / range_expansion).
+    trigger = event.get("trigger") or {}
     return (
         event_id,
         ts,
         symbol,
         event.get("event_type"),
-        psycopg2.extras.Json(event.get("trigger") or {}),
+        psycopg2.extras.Json(trigger),
         event.get("regime_id"),
+        trigger.get("range_label"),
     )
 
 
