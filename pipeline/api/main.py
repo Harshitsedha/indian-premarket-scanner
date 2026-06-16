@@ -654,6 +654,103 @@ def edge_summary(days: int = Query(default=90, ge=1, le=365)):
     return _safe(stats)
 
 
+# ── Phase 2 /edge event table ─────────────────────────────────────────────────
+# Queryable, exportable one-row-per-event table over radar_events ⋈ event_labels.
+# Shares processing.edge_events with the export so the listing and the CSV/Parquet
+# can never drift. (This is the NEW edge page; /api/edge/summary above is the old,
+# unrelated setups/outcomes summary and is left untouched.)
+
+from fastapi import Response
+from processing import edge_events as _edge
+
+
+def _edge_filters(
+    date_from:  str | None,
+    date_to:    str | None,
+    symbol:     str | None,
+    event_type: str | None,
+    direction:  str | None,
+    rvol_min:   float | None,
+    gap_min:    float | None,
+    gap_max:    float | None,
+) -> "_edge.EdgeFilters":
+    try:
+        return _edge.EdgeFilters(
+            date_from=date_from, date_to=date_to, symbol=symbol,
+            event_type=event_type, direction=direction,
+            rvol_min=rvol_min, gap_min=gap_min, gap_max=gap_max,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/edge/events")
+def edge_events(
+    date_from:  str | None  = Query(default=None),
+    date_to:    str | None  = Query(default=None),
+    symbol:     str | None  = Query(default=None),
+    event_type: str | None  = Query(default=None),
+    direction:  str | None  = Query(default=None),
+    rvol_min:   float | None = Query(default=None),
+    gap_min:    float | None = Query(default=None),
+    gap_max:    float | None = Query(default=None),
+    sort:       str         = Query(default=_edge.DEFAULT_SORT),
+    order:      str         = Query(default="desc", pattern="^(asc|desc)$"),
+    limit:      int         = Query(default=50, ge=1, le=200),
+    offset:     int         = Query(default=0, ge=0),
+):
+    """One row per event with label horizons pivoted to columns. Server-side filter /
+    sort / paginate. Returns {rows, total, limit, offset}."""
+    if sort not in _edge.SORT_KEYS:
+        raise HTTPException(422, f"Unknown sort {sort!r}. Allowed: {', '.join(_edge.SORT_KEYS)}")
+    filters = _edge_filters(date_from, date_to, symbol, event_type,
+                            direction, rvol_min, gap_min, gap_max)
+    conn = _db()
+    try:
+        rows, total = _edge.query_events(
+            conn, filters, sort=sort, ascending=(order == "asc"),
+            limit=limit, offset=offset,
+        )
+    finally:
+        conn.close()
+    return {"rows": _safe(rows), "total": total, "limit": limit, "offset": offset}
+
+
+@app.get("/api/edge/events/export")
+def edge_events_export(
+    fmt:        str         = Query(default="csv", pattern="^(csv|parquet)$"),
+    date_from:  str | None  = Query(default=None),
+    date_to:    str | None  = Query(default=None),
+    symbol:     str | None  = Query(default=None),
+    event_type: str | None  = Query(default=None),
+    direction:  str | None  = Query(default=None),
+    rvol_min:   float | None = Query(default=None),
+    gap_min:    float | None = Query(default=None),
+    gap_max:    float | None = Query(default=None),
+    sort:       str         = Query(default=_edge.DEFAULT_SORT),
+    order:      str         = Query(default="desc", pattern="^(asc|desc)$"),
+):
+    """Export the FULL filtered set (NOT the current page) as CSV or Parquet. Same
+    filters/sort as the listing; schema = edge_events.export_columns()."""
+    if sort not in _edge.SORT_KEYS:
+        raise HTTPException(422, f"Unknown sort {sort!r}. Allowed: {', '.join(_edge.SORT_KEYS)}")
+    filters = _edge_filters(date_from, date_to, symbol, event_type,
+                            direction, rvol_min, gap_min, gap_max)
+    conn = _db()
+    try:
+        payload = _edge.export_bytes(conn, filters, fmt, sort=sort, ascending=(order == "asc"))
+    finally:
+        conn.close()
+    stamp    = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    media    = "text/csv" if fmt == "csv" else "application/octet-stream"
+    filename = f"edge_events_{stamp}.{fmt}"
+    return Response(
+        content=payload,
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # ── Backtest endpoints ────────────────────────────────────────────────────────
 
 
