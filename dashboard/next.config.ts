@@ -1,11 +1,10 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // TEMP: disabled, re-enable later — remove these two redirect entries
+  // TEMP: disabled, re-enable later — /edge is now the Phase 2 event table (live).
   async redirects() {
     return [
       { source: "/history", destination: "/", permanent: false },
-      { source: "/edge",    destination: "/", permanent: false },
     ];
   },
 
